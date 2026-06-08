@@ -239,9 +239,7 @@ class FloatLabel(QWidget):
         # 宽度稳定后才对加载的 pos 做屏幕钛制，确保窗口可见且不被错误拽回
         QTimer.singleShot(0, self._clamp_pending_pos)
 
-        # 初始化 Windows API 置顶调用（一次性设置）
-        self._setup_topmost_api()
-
+        # 定时器周期性确保窗口置顶（跨平台，使用 Qt flags）
         self._keep_top_timer = QTimer(self)
         self._keep_top_timer.setInterval(1000)  # 每 1000ms 检查一次
         self._keep_top_timer.timeout.connect(self._ensure_on_top)
@@ -477,7 +475,7 @@ class FloatLabel(QWidget):
                 border-bottom: 1px solid {line_col};
                 font-weight: 600;
                 color: {header_col};
-                padding: 2px 4px;
+                padding: 0px 4px;
             }}
         """)
         self.table.setFont(self.font)
@@ -490,6 +488,8 @@ class FloatLabel(QWidget):
         self.table.verticalHeader().setDefaultSectionSize(h)
         for r in range(self.model.rowCount()):
             self.table.setRowHeight(r, h)
+        # 表头行高与数据行一致
+        self.table.horizontalHeader().setFixedHeight(h)
 
     def _fit_to_contents(self):
         # 记录调整尺寸前的左右边界，用于按锚点重新定位
@@ -637,6 +637,8 @@ class FloatLabel(QWidget):
                 # 显示数量（手）或价格或数量和价格（手数(价格)）
                 paired_cnt = int(paired/100)
                 unpaired_cnt = int(unpaired_sign/100)
+                paired_fmt = self._fmt_lots(paired_cnt)
+                unpaired_fmt = f"+{self._fmt_lots(unpaired_cnt)}" if unpaired_cnt >= 0 else f"-{self._fmt_lots(abs(unpaired_cnt))}"
                 b_price = f"{first_pur:.3f}" if etf else f"{first_pur:.2f}"
                 s_price = f"{first_sell:.3f}" if etf else f"{first_sell:.2f}"
                 mode = getattr(self, 'b1s1_display', 'qty')
@@ -644,11 +646,11 @@ class FloatLabel(QWidget):
                     b1_label = f"{b_price}"
                     s1_label = f"{s_price}"
                 elif mode == 'both':
-                    b1_label = f"{paired_cnt:d}({b_price})"
-                    s1_label = f"{unpaired_cnt:+d}({s_price})"
+                    b1_label = f"{paired_fmt}({b_price})"
+                    s1_label = f"{unpaired_fmt}({s_price})"
                 else:
-                    b1_label = f"{paired_cnt:d}"
-                    s1_label = f"{unpaired_cnt:+d}"
+                    b1_label = f"{paired_fmt}"
+                    s1_label = f"{unpaired_fmt}"
                 # 竞价颜色：根据未配对量的方向
                 if unpaired_sign > 0:
                     b1_color_sign = 1
@@ -662,7 +664,7 @@ class FloatLabel(QWidget):
             else:
                 # 连续竞价：买一数量/卖一数量
                 if first_pur > 0:
-                    cnt = f"{int(purchaser[0]/100)}"
+                    cnt = self._fmt_lots(int(purchaser[0]/100))
                     b_price = f"{first_pur:.3f}" if etf else f"{first_pur:.2f}"
                     mode = getattr(self, 'b1s1_display', 'qty')
                     if mode == 'price':
@@ -675,7 +677,7 @@ class FloatLabel(QWidget):
                     b1_label = f"-{buy_marker}"
 
                 if first_sell > 0:
-                    cnt = f"{int(seller[0]/100)}"
+                    cnt = self._fmt_lots(int(seller[0]/100))
                     s_price = f"{first_sell:.3f}" if etf else f"{first_sell:.2f}"
                     mode = getattr(self, 'b1s1_display', 'qty')
                     if mode == 'price':
@@ -991,6 +993,17 @@ class FloatLabel(QWidget):
             return f"{self.sym_fall}{abs(value):.{decimals}f}"
         else:
             return f"{self.sym_rise}{0:.{decimals}f}"
+
+    @staticmethod
+    def _fmt_lots(lots: int) -> str:
+        """格式化手数：>=1亿显示X.X亿，>=1万显示X.X万，否则原数字。"""
+        abs_lots = abs(lots)
+        if abs_lots >= 100000000:
+            return f"{lots/1e8:.1f}亿"
+        elif abs_lots >= 10000:
+            return f"{lots/1e4:.1f}万"
+        else:
+            return f"{lots}"
 
     def set_cost(self, code: str, cost: float, qty: int):
         """设置指定股票的持仓成本与数量。cost<=0 或 qty==0 时清除。"""
@@ -1422,26 +1435,8 @@ class FloatLabel(QWidget):
         if self._keep_top_timer and self._keep_top_timer.isActive():
             self._keep_top_timer.stop()
 
-    def _setup_topmost_api(self):
-        """一次性初始化 Windows API 置顶调用所需的对象"""
-        try:
-            import ctypes
-            from ctypes import wintypes
-            _user32 = ctypes.windll.user32
-            _user32.SetWindowPos.argtypes = [
-                wintypes.HWND, wintypes.HWND,
-                ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int,
-                wintypes.UINT
-            ]
-            _user32.SetWindowPos.restype = wintypes.BOOL
-            self._swp_func = _user32.SetWindowPos
-            self._HWND_TOPMOST = wintypes.HWND(-1)
-            self._SWP_FLAGS = 0x0010 | 0x0002 | 0x0001  # NOACTIVATE | NOMOVE | NOSIZE
-            self._wintypes_HWND = wintypes.HWND
-        except Exception:
-            self._swp_func = None
-
     def _ensure_on_top(self):
+        """跨平台置顶：利用 Qt.WindowStaysOnTopHint 保持窗口始终在最前。"""
         if not self.isVisible():
             return
         try:
@@ -1450,15 +1445,8 @@ class FloatLabel(QWidget):
                 return
         except Exception:
             pass
-        # 使用缓存的 Windows API 保持置顶
-        if self._swp_func:
-            try:
-                hwnd = self._wintypes_HWND(int(self.winId()))
-                self._swp_func(hwnd, self._HWND_TOPMOST, 0, 0, 0, 0, self._SWP_FLAGS)
-            except Exception:
-                self.raise_()
-        else:
-            self.raise_()
+        # 通过 raise_() 确保置顶；flags 中已包含 WindowStaysOnTopHint
+        self.raise_()
 
     def _register_hotkey(self):
         try:
