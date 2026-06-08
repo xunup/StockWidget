@@ -81,6 +81,7 @@ class App(QApplication):
             pass
         self.win.set_on_change(self.save_now)
         self.win.set_open_settings_callback(self.open_settings)
+        self.win.set_notifier_callback(self.notify_user)
 
         self.tray = QSystemTrayIcon(app_icon, self)
         self.tray.setToolTip(APP_NAME)
@@ -118,7 +119,7 @@ class App(QApplication):
             self.settings_dlg.raise_()
             self.settings_dlg.activateWindow()
             return
-        self.settings_dlg = SettingsDialog(self.win, self.win, app=self)
+        self.settings_dlg = SettingsDialog(self.win, None, app=self)
         # 将设置窗口放在屏幕正中
         screen = QApplication.primaryScreen().availableGeometry()
         self.settings_dlg.adjustSize()
@@ -181,6 +182,15 @@ class App(QApplication):
         try:
             if hasattr(self, 'tray') and self.tray is not None:
                 self.tray.setIcon(icon)
+        except Exception:
+            pass
+
+    def notify_user(self, title: str, msg: str):
+        """通过系统托盘显示通知（用于封单预警等场景）。"""
+        try:
+            if hasattr(self, 'tray') and self.tray is not None:
+                self.tray.showMessage(str(title or ""), str(msg or ""),
+                                      QSystemTrayIcon.Information, 5000)
         except Exception:
             pass
 

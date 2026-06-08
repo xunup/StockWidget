@@ -2,10 +2,10 @@ from PySide6.QtCore import Qt, QRect, QAbstractTableModel, QModelIndex
 from PySide6.QtGui import QColor, QPainter, QPen, QBrush
 from PySide6.QtWidgets import QStyledItemDelegate
 
-# ----- 颜色配置 -----
-UP_COLOR = QColor("#dd2100")
-DOWN_COLOR = QColor("#019933")
-NEUTRAL_COLOR = QColor("#494949")
+# ----- 默认颜色（用于恢复默认）-----
+DEFAULT_UP_COLOR = QColor("#ff4500")
+DEFAULT_DOWN_COLOR = QColor("#2adb5c")
+DEFAULT_TABLE_COLOR = QColor("#FFFFFF")
 
 class SimpleTableModel(QAbstractTableModel):
     """
@@ -16,13 +16,15 @@ class SimpleTableModel(QAbstractTableModel):
         self._rows = rows or []
         self._headers = headers or []
         self._align_right = align_right_cols or []
-        self.default_color = False
-        self.fg_color = QColor("#FFFFFF")
+        self.up_color = QColor(DEFAULT_UP_COLOR)
+        self.down_color = QColor(DEFAULT_DOWN_COLOR)
+        self.table_color = QColor(DEFAULT_TABLE_COLOR)
         self._row_meta = []
 
-    def set_color_scheme(self, default: bool, fg: QColor):
-        self.default_color = bool(default)
-        self.fg_color = QColor(fg)
+    def set_color_scheme(self, table: QColor, up: QColor, down: QColor):
+        self.table_color = QColor(table)
+        self.up_color = QColor(up)
+        self.down_color = QColor(down)
 
     def rowCount(self, parent=QModelIndex()):
         return len(self._rows)
@@ -48,9 +50,6 @@ class SimpleTableModel(QAbstractTableModel):
             return (Qt.AlignRight | Qt.AlignVCenter) if c in self._align_right else (Qt.AlignLeft | Qt.AlignVCenter)
 
         if role == Qt.ForegroundRole:
-            if not self.default_color:
-                return self.fg_color
-
             meta = self._row_meta[r] if 0 <= r < len(self._row_meta) else {}
             header = self._headers[c] if 0 <= c < len(self._headers) else ""
             sign = 0
@@ -64,14 +63,16 @@ class SimpleTableModel(QAbstractTableModel):
                 sign = int(meta.get("b1", 0))
             elif header == "卖一":
                 sign = int(meta.get("s1", 0))
+            elif header == "盈亏":
+                sign = int(meta.get("pnl", 0))
             else:
-                return self.fg_color
+                return self.table_color
 
             if sign > 0:
-                return UP_COLOR
+                return self.up_color
             if sign < 0:
-                return DOWN_COLOR
-            return NEUTRAL_COLOR
+                return self.down_color
+            return self.table_color
 
         return None
 
@@ -97,14 +98,16 @@ class KLineDelegate(QStyledItemDelegate):
     """
     def __init__(self, parent=None, base_pt=12):
         super().__init__(parent)
-        self.default_color = False
-        self.fg = QColor("#FFFFFF")
+        self.up_color = QColor(DEFAULT_UP_COLOR)
+        self.down_color = QColor(DEFAULT_DOWN_COLOR)
+        self.table_color = QColor(DEFAULT_TABLE_COLOR)
         self.base_pt = max(1, int(base_pt))
         self.scale = 1.0  # 缩放
 
-    def update_scheme(self, default_color: bool, fg: QColor):
-        self.default_color = bool(default_color)
-        self.fg = QColor(fg)
+    def update_scheme(self, table: QColor, up: QColor, down: QColor):
+        self.table_color = QColor(table)
+        self.up_color = QColor(up)
+        self.down_color = QColor(down)
 
     def set_point_size(self, pt: int):
         self.scale = max(0.5, min(1.5, float(pt) / float(self.base_pt)))
@@ -143,19 +146,17 @@ class KLineDelegate(QStyledItemDelegate):
         x = krect.center().x()
 
         # 昨收虚线
-        dash_col = QColor(NEUTRAL_COLOR if self.default_color else self.fg)
+        dash_col = QColor(self.table_color)
         dash_col.setAlpha(180)
         painter.setPen(QPen(dash_col, 1, Qt.DashLine))
         painter.drawLine(x - body_w, y_p, x + body_w, y_p)
 
-        kcolor = self.fg
-        if self.default_color:
-            if c>o:
-                kcolor = UP_COLOR
-            elif c<o:
-                kcolor = DOWN_COLOR
-            else:
-                kcolor = NEUTRAL_COLOR
+        if c > o:
+            kcolor = self.up_color
+        elif c < o:
+            kcolor = self.down_color
+        else:
+            kcolor = self.table_color
 
         top, bot = min(y_o, y_c), max(y_o, y_c)
         body_h = max(2, bot - top)

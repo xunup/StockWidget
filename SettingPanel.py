@@ -2,14 +2,177 @@ import os, re
 from functools import partial
 
 from PySide6.QtCore import Qt, QSize
-from PySide6.QtGui import QColor, QFontDatabase, QKeySequence
+from PySide6.QtGui import QColor, QFontDatabase, QKeySequence, QDoubleValidator, QIntValidator, QAction
 from PySide6.QtWidgets import (
     QWidget, QDialog, QVBoxLayout, QHBoxLayout, QGridLayout, QTabWidget, QPushButton, QSlider,
     QGroupBox, QLabel, QColorDialog, QComboBox, QAbstractItemView,
-    QCheckBox, QListWidget, QListWidgetItem, QKeySequenceEdit, QFileDialog
+    QCheckBox, QListWidget, QListWidgetItem, QKeySequenceEdit, QFileDialog, QLineEdit, QMenu
 )
 from WidgetPanel import FloatLabel
 
+
+class CostDialog(QDialog):
+    """设置持仓成本与数量的对话框。"""
+    def __init__(self, parent: QWidget, code: str, cost: float = 0.0, qty: int = 0):
+        super().__init__(parent)
+        self.setWindowTitle(f"设置成本 - {code}")
+        self.setModal(True)
+        self.setFixedWidth(260)
+
+        layout = QGridLayout(self)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setHorizontalSpacing(8)
+        layout.setVerticalSpacing(8)
+
+        layout.addWidget(QLabel("成本价："), 0, 0)
+        self.edit_cost = QLineEdit(f"{cost:g}" if cost and cost > 0 else "")
+        self.edit_cost.setPlaceholderText("例如 12.345")
+        cost_v = QDoubleValidator(0.0, 1e9, 4, self)
+        cost_v.setNotation(QDoubleValidator.StandardNotation)
+        self.edit_cost.setValidator(cost_v)
+        layout.addWidget(self.edit_cost, 0, 1)
+
+        layout.addWidget(QLabel("持仓数量："), 1, 0)
+        self.edit_qty = QLineEdit(str(qty) if qty else "")
+        self.edit_qty.setPlaceholderText("股数，可为负")
+        self.edit_qty.setValidator(QIntValidator(-10**9, 10**9, self))
+        layout.addWidget(self.edit_qty, 1, 1)
+
+        btn_row = QHBoxLayout()
+        btn_row.addStretch(1)
+        self.btn_clear = QPushButton("清除")
+        self.btn_ok = QPushButton("确定")
+        self.btn_cancel = QPushButton("取消")
+        for b in (self.btn_clear, self.btn_ok, self.btn_cancel):
+            b.setFixedWidth(60)
+            btn_row.addWidget(b)
+        layout.addLayout(btn_row, 2, 0, 1, 2)
+
+        self._cleared = False
+        self.btn_ok.clicked.connect(self.accept)
+        self.btn_cancel.clicked.connect(self.reject)
+        self.btn_clear.clicked.connect(self._on_clear)
+
+    def _on_clear(self):
+        self._cleared = True
+        self.accept()
+
+    def get_values(self):
+        """返回 (cost, qty)。清除时返回 (0.0, 0)。"""
+        if self._cleared:
+            return 0.0, 0
+        try:
+            cost = float(self.edit_cost.text().strip() or 0)
+        except Exception:
+            cost = 0.0
+        try:
+            qty = int(self.edit_qty.text().strip() or 0)
+        except Exception:
+            qty = 0
+        return cost, qty
+
+
+class AlertDialog(QDialog):
+    """设置封单预警阈值的对话框。可添加多个阈值：正=涨停封单手数，负=跌停封单手数。"""
+    def __init__(self, parent: QWidget, code: str, thresholds: list = None):
+        super().__init__(parent)
+        self.setWindowTitle(f"封单预警 - {code}")
+        self.setModal(True)
+        self.setFixedWidth(320)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(8)
+
+        tip = QLabel("正值=涨停封单（手），负值=跌停封单（手）。\n"
+                     "进入涨/跌停且封单达阈值时生效；\n"
+                     "封单跌破阈值或打开涨/跌停时通知并失效。")
+        tip.setWordWrap(True)
+        tip.setStyleSheet("color: #888;")
+        layout.addWidget(tip)
+
+        self.list_thresholds = QListWidget()
+        self.list_thresholds.setFixedHeight(120)
+        for t in (thresholds or []):
+            try:
+                self._add_item(int(t))
+            except Exception:
+                pass
+        layout.addWidget(self.list_thresholds)
+
+        add_row = QHBoxLayout()
+        self.edit_value = QLineEdit()
+        self.edit_value.setPlaceholderText("手数：正=涨停，负=跌停")
+        self.edit_value.setValidator(QIntValidator(-10**8, 10**8, self))
+        self.btn_add_alert = QPushButton("添加")
+        self.btn_add_alert.setFixedWidth(60)
+        self.btn_remove_alert = QPushButton("删除")
+        self.btn_remove_alert.setFixedWidth(60)
+        add_row.addWidget(self.edit_value, 1)
+        add_row.addWidget(self.btn_add_alert)
+        add_row.addWidget(self.btn_remove_alert)
+        layout.addLayout(add_row)
+
+        btn_row = QHBoxLayout()
+        btn_row.addStretch(1)
+        self.btn_clear_all = QPushButton("清除全部")
+        self.btn_ok = QPushButton("确定")
+        self.btn_cancel = QPushButton("取消")
+        for b in (self.btn_clear_all, self.btn_ok, self.btn_cancel):
+            b.setFixedWidth(70)
+            btn_row.addWidget(b)
+        layout.addLayout(btn_row)
+
+        self.btn_add_alert.clicked.connect(self._on_add)
+        self.edit_value.returnPressed.connect(self._on_add)
+        self.btn_remove_alert.clicked.connect(self._on_remove)
+        self.btn_clear_all.clicked.connect(self.list_thresholds.clear)
+        self.btn_ok.clicked.connect(self.accept)
+        self.btn_cancel.clicked.connect(self.reject)
+
+    def _add_item(self, n: int):
+        if n == 0:
+            return
+        for i in range(self.list_thresholds.count()):
+            try:
+                if int(self.list_thresholds.item(i).data(Qt.UserRole)) == n:
+                    return
+            except Exception:
+                pass
+        label = f"{n:+d} 手 ({'涨停' if n > 0 else '跌停'})"
+        item = QListWidgetItem(label)
+        item.setData(Qt.UserRole, n)
+        self.list_thresholds.addItem(item)
+
+    def _on_add(self):
+        try:
+            txt = self.edit_value.text().strip()
+            if not txt:
+                return
+            n = int(txt)
+            self._add_item(n)
+            self.edit_value.clear()
+        except Exception:
+            pass
+
+    def _on_remove(self):
+        row = self.list_thresholds.currentRow()
+        if row >= 0:
+            self.list_thresholds.takeItem(row)
+
+    def get_thresholds(self):
+        result = []
+        for i in range(self.list_thresholds.count()):
+            try:
+                n = int(self.list_thresholds.item(i).data(Qt.UserRole))
+                if n != 0:
+                    result.append(n)
+            except Exception:
+                pass
+        return result
+
+
+MIN_FONT_SIZE = 6
 class SettingsDialog(QDialog):
     def __init__(self, win: FloatLabel, parent: QWidget, app=None):
         super().__init__(parent)
@@ -26,9 +189,9 @@ class SettingsDialog(QDialog):
 
         self.tab_sizes = {
             0: QSize(300, 300),
-            1: QSize(440, 420),
-            2: QSize(360, 350),
-            3: QSize(300, 220),
+            1: QSize(480, 750),
+            2: QSize(400, 460),
+            3: QSize(300, 280),
         }
         self._apply_tab_size(0)
 
@@ -62,7 +225,13 @@ class SettingsDialog(QDialog):
         self.btn_up.setFixedWidth(60)
         self.btn_dn  = QPushButton("下移")
         self.btn_dn.setFixedWidth(60)
-        for b in (self.btn_add, self.btn_del, self.btn_up, self.btn_dn):
+        self.btn_cost = QPushButton("设置成本")
+        self.btn_cost.setFixedWidth(60)
+        self.btn_cost.setEnabled(False)
+        self.btn_alert = QPushButton("封单预警")
+        self.btn_alert.setFixedWidth(60)
+        self.btn_alert.setEnabled(False)
+        for b in (self.btn_add, self.btn_del, self.btn_up, self.btn_dn, self.btn_cost, self.btn_alert):
             btn_col.addWidget(b)
         btn_col.addStretch(1)
 
@@ -91,10 +260,35 @@ class SettingsDialog(QDialog):
         data_settings.addWidget(g_interval)
 
         # 3.显示选项
-        # 3.1复选框组
-        g_flags = QGroupBox("显示指标")
+        # 3.0 双模式切换开关
+        g_dual_mode = QGroupBox("双模式切换")
+        g_dual_mode.setContentsMargins(3,12,3,6)
+        gl_dual_mode = QGridLayout(g_dual_mode)
+        gl_dual_mode.setHorizontalSpacing(6)
+        gl_dual_mode.setVerticalSpacing(6)
+        self.chk_dual_mode = QCheckBox("启用模式切换（悬浮显示正常模式，离开显示简易模式）")
+        self.chk_dual_mode.setChecked(bool(self.win.dual_mode_enabled))
+        gl_dual_mode.addWidget(self.chk_dual_mode, 0, 0, 1, 3)
+        # 延迟设置
+        gl_dual_mode.addWidget(QLabel("切换延迟："), 1, 0)
+        self.cmb_leave_delay = QComboBox()
+        self.cmb_leave_delay.setFixedWidth(100)
+        for ms, label in [(0, "无延迟"), (200, "0.2 秒"), (500, "0.5 秒"), (1000, "1 秒"), (2000, "2 秒"), (3000, "3 秒")]:
+            self.cmb_leave_delay.addItem(label, userData=ms)
+        idx_delay = self.cmb_leave_delay.findData(self.win.leave_delay_ms)
+        if idx_delay < 0:
+            idx_delay = self.cmb_leave_delay.findData(500)
+        self.cmb_leave_delay.setCurrentIndex(idx_delay if idx_delay >= 0 else 2)
+        self.cmb_leave_delay.setEnabled(bool(self.win.dual_mode_enabled))
+        gl_dual_mode.addWidget(self.cmb_leave_delay, 1, 1)
+        data_settings.addWidget(g_dual_mode)
+
+        # 3.1复选框组 - 正常模式
+        g_flags = QGroupBox("正常模式指标")
         g_flags.setContentsMargins(3,12,3,6)
         gl_flags = QGridLayout(g_flags)
+        gl_flags.setHorizontalSpacing(8)
+        gl_flags.setVerticalSpacing(6)
         self.cbs: list[QCheckBox] = []
         cb_texts = self.win.ALL_HEADERS
 
@@ -127,13 +321,13 @@ class SettingsDialog(QDialog):
         gl_flag_price = QGridLayout(g_flag_price)
         gl_flag_price.setHorizontalSpacing(6)
         gl_flag_price.setVerticalSpacing(6)
-        # 现价、涨跌值、涨跌幅
-        for i, h in enumerate(cb_texts[2:5]):
+        # 现价、涨跌值、涨跌幅、盈亏 — 2×2 网格布局
+        for i, h in enumerate(cb_texts[2:6]):
             cb = QCheckBox(h)
             cb.setChecked(self.win.header_is_visible(h))
             cb.stateChanged.connect(partial(self._on_cb_changed, h))
             self.cbs.append(cb)
-            gl_flag_price.addWidget(cb, i, 0)
+            gl_flag_price.addWidget(cb, i // 2, i % 2)
         gl_flags.addWidget(g_flag_price, 1, 0)
 
         g_flag_order = QGroupBox("盘口")
@@ -156,7 +350,7 @@ class SettingsDialog(QDialog):
         
         # 买一/卖一显示模式：数量 / 价格 / 数量和价格
         self.cmb_b1s1_display = QComboBox()
-        self.cmb_b1s1_display.setFixedWidth(100)
+        self.cmb_b1s1_display.setFixedWidth(150)
         self.cmb_b1s1_display.addItem("数量", userData="qty")
         self.cmb_b1s1_display.addItem("价格", userData="price")
         self.cmb_b1s1_display.addItem("数量和价格", userData="both")
@@ -171,27 +365,86 @@ class SettingsDialog(QDialog):
         gl_flag_deal = QGridLayout(g_flag_deal)
         gl_flag_deal.setHorizontalSpacing(6)
         gl_flag_deal.setVerticalSpacing(6)
-        for i in range(8,11):
-            cb = QCheckBox(cb_texts[i])
-            cb.setChecked(self.win.header_is_visible(cb_texts[i]))
-            cb.stateChanged.connect(partial(self._on_cb_changed, cb_texts[i]))
+        for i, idx in enumerate(range(9,12)):
+            cb = QCheckBox(cb_texts[idx])
+            cb.setChecked(self.win.header_is_visible(cb_texts[idx]))
+            cb.stateChanged.connect(partial(self._on_cb_changed, cb_texts[idx]))
             self.cbs.append(cb)
-            gl_flag_deal.addWidget(cb, i-8, 0)
+            gl_flag_deal.addWidget(cb, i // 2, i % 2)
         gl_flags.addWidget(g_flag_deal, 1, 1)
 
         g_flag_other = QGroupBox("其他")
         gl_flag_other = QGridLayout(g_flag_other)
         gl_flag_other.setHorizontalSpacing(6)
         gl_flag_other.setVerticalSpacing(6)
-        for i in range(11,12):
+        for i in range(12,13):
             cb = QCheckBox(cb_texts[i])
             cb.setChecked(self.win.header_is_visible(cb_texts[i]))
             cb.stateChanged.connect(partial(self._on_cb_changed, cb_texts[i]))
             self.cbs.append(cb)
-            gl_flag_other.addWidget(cb, i-11, 0)
+            gl_flag_other.addWidget(cb, i-12, 0)
         gl_flags.addWidget(g_flag_other, 2, 0)
 
         data_settings.addWidget(g_flags)
+
+        # 3.2 简易模式指标复选框组
+        g_simple_flags = QGroupBox("简易模式指标")
+        g_simple_flags.setContentsMargins(3,12,3,6)
+        gl_simple = QGridLayout(g_simple_flags)
+        gl_simple.setHorizontalSpacing(6)
+        gl_simple.setVerticalSpacing(6)
+        self.simple_cbs: list[QCheckBox] = []
+        simple_headers = ["代码", "名称", "现价", "涨跌值", "涨跌幅", "盈亏", "买一/卖一", "委比", "成交量", "成交额", "均价", "K线"]
+        simple_header_keys = ["代码", "名称", "现价", "涨跌值", "涨跌幅", "盈亏", "买一", "委比", "成交量", "成交额", "均价", "K线"]
+        for i, (label, key) in enumerate(zip(simple_headers, simple_header_keys)):
+            cb = QCheckBox(label)
+            cb.setChecked(self.win.simple_header_is_visible(key))
+            cb.stateChanged.connect(partial(self._on_simple_cb_changed, key))
+            self.simple_cbs.append(cb)
+            gl_simple.addWidget(cb, i // 4, i % 4)
+        # 简易模式指标组仅在双模式启用时可编辑
+        g_simple_flags.setEnabled(bool(self.win.dual_mode_enabled))
+        self._g_simple_flags = g_simple_flags
+        data_settings.addWidget(g_simple_flags)
+
+        # 符号设置
+        g_symbols = QGroupBox("标记符号")
+        g_symbols.setContentsMargins(3,12,3,6)
+        gl_sym = QGridLayout(g_symbols)
+        gl_sym.setHorizontalSpacing(6)
+        gl_sym.setVerticalSpacing(6)
+        gl_sym.addWidget(QLabel("日高:"), 0, 0)
+        self.edit_sym_high = QLineEdit(self.win.sym_high)
+        self.edit_sym_high.setFixedWidth(40)
+        self.edit_sym_high.setMaxLength(2)
+        gl_sym.addWidget(self.edit_sym_high, 0, 1)
+        gl_sym.addWidget(QLabel("日低:"), 0, 2)
+        self.edit_sym_low = QLineEdit(self.win.sym_low)
+        self.edit_sym_low.setFixedWidth(40)
+        self.edit_sym_low.setMaxLength(2)
+        gl_sym.addWidget(self.edit_sym_low, 0, 3)
+        gl_sym.addWidget(QLabel("涨停:"), 1, 0)
+        self.edit_sym_limit_up = QLineEdit(self.win.sym_limit_up)
+        self.edit_sym_limit_up.setFixedWidth(40)
+        self.edit_sym_limit_up.setMaxLength(2)
+        gl_sym.addWidget(self.edit_sym_limit_up, 1, 1)
+        gl_sym.addWidget(QLabel("跌停:"), 1, 2)
+        self.edit_sym_limit_down = QLineEdit(self.win.sym_limit_down)
+        self.edit_sym_limit_down.setFixedWidth(40)
+        self.edit_sym_limit_down.setMaxLength(2)
+        gl_sym.addWidget(self.edit_sym_limit_down, 1, 3)
+        gl_sym.addWidget(QLabel("涨:"), 2, 0)
+        self.edit_sym_rise = QLineEdit(self.win.sym_rise)
+        self.edit_sym_rise.setFixedWidth(40)
+        self.edit_sym_rise.setMaxLength(2)
+        gl_sym.addWidget(self.edit_sym_rise, 2, 1)
+        gl_sym.addWidget(QLabel("跌:"), 2, 2)
+        self.edit_sym_fall = QLineEdit(self.win.sym_fall)
+        self.edit_sym_fall.setFixedWidth(40)
+        self.edit_sym_fall.setMaxLength(2)
+        gl_sym.addWidget(self.edit_sym_fall, 2, 3)
+        data_settings.addWidget(g_symbols)
+        data_settings.addStretch(1)
 
         self.tabs.addTab(tab_1, "显示数据")
 
@@ -221,38 +474,60 @@ class SettingsDialog(QDialog):
         gl_color = QGridLayout(g_color)
         gl_color.setHorizontalSpacing(6)
         gl_color.setVerticalSpacing(6)
-        # 3.1 复选框：默认颜色
-        self.chk_default_color = QCheckBox("默认颜色")
-        self.chk_default_color.setChecked(self.win.default_color)
-        # 3.2 按钮：文字颜色
-        self.btn_fg = QPushButton("文字颜色…")
+        # 3.1 颜色按钮：涨/跌/表格/背景
+        self.btn_up_color = QPushButton("涨颜色…")
+        self.btn_up_color.setFixedWidth(90)
+        self.btn_down_color = QPushButton("跌颜色…")
+        self.btn_down_color.setFixedWidth(90)
+        self.btn_fg = QPushButton("表格颜色…")
         self.btn_fg.setFixedWidth(90)
-        self.btn_fg.setEnabled(not self.win.default_color)
-        # 3.3 按钮：背景颜色
         self.btn_bg = QPushButton("背景颜色…")
         self.btn_bg.setFixedWidth(90)
-        # 3.4 滑块：背景不透明度
+        # 3.2 恢复默认按钮
+        self.btn_reset_colors = QPushButton("恢复默认")
+        self.btn_reset_colors.setFixedWidth(90)
+        # 3.3 滑块：表格不透明度（表格线/表头底边线）
+        self.slider_grid_alpha = QSlider(Qt.Horizontal)
+        self.slider_grid_alpha.setRange(0, 100)
+        self.slider_grid_alpha.setMinimumWidth(150)
+        self.slider_grid_alpha.setValue(int(getattr(self.win, 'grid_alpha_pct', 31)))
+        self.lbl_grid_alpha = QLabel(f"{self.slider_grid_alpha.value()}%")
+        # 3.4 滑块：表头不透明度（表头文字）
+        self.slider_header_alpha = QSlider(Qt.Horizontal)
+        self.slider_header_alpha.setRange(0, 100)
+        self.slider_header_alpha.setMinimumWidth(150)
+        self.slider_header_alpha.setValue(int(getattr(self.win, 'header_alpha_pct', 100)))
+        self.lbl_header_alpha = QLabel(f"{self.slider_header_alpha.value()}%")
+        # 3.5 滑块：背景不透明度
         self.slider_bg_alpha = QSlider(Qt.Horizontal)
         self.slider_bg_alpha.setRange(1, 100)
         self.slider_bg_alpha.setMinimumWidth(150)
         self.slider_bg_alpha.setValue(int(round(self.win.bg.alpha()/2.55)))
         self.lbl_bg_alpha = QLabel(f"{self.slider_bg_alpha.value()}%")
-        # 3.5 滑块：整体不透明度
+        # 3.6 滑块：整体不透明度
         self.slider_win_opacity = QSlider(Qt.Horizontal)
         self.slider_win_opacity.setRange(20, 100)
         self.slider_win_opacity.setMinimumWidth(150)
         self.slider_win_opacity.setValue(int(round(self.win.windowOpacity()*100)))
         self.lbl_win_opacity = QLabel(f"{self.slider_win_opacity.value()}%")
 
-        gl_color.addWidget(self.chk_default_color,0,0,1,2)
-        gl_color.addWidget(self.btn_fg,0,2,1,2)
-        gl_color.addWidget(self.btn_bg,0,4,1,2)
-        gl_color.addWidget(QLabel("背景不透明度："),1,0,1,2)
-        gl_color.addWidget(self.slider_bg_alpha,1,2,1,3)
-        gl_color.addWidget(self.lbl_bg_alpha,1,5,1,1)
-        gl_color.addWidget(QLabel("整体不透明度："),2,0,1,2)
-        gl_color.addWidget(self.slider_win_opacity,2,2,1,3)
-        gl_color.addWidget(self.lbl_win_opacity,2,5,1,1)
+        gl_color.addWidget(self.btn_up_color,0,0,1,2)
+        gl_color.addWidget(self.btn_down_color,0,2,1,2)
+        gl_color.addWidget(self.btn_fg,0,4,1,2)
+        gl_color.addWidget(self.btn_bg,1,0,1,2)
+        gl_color.addWidget(self.btn_reset_colors,1,4,1,2)
+        gl_color.addWidget(QLabel("表格不透明度："),2,0,1,2)
+        gl_color.addWidget(self.slider_grid_alpha,2,2,1,3)
+        gl_color.addWidget(self.lbl_grid_alpha,2,5,1,1)
+        gl_color.addWidget(QLabel("表头不透明度："),3,0,1,2)
+        gl_color.addWidget(self.slider_header_alpha,3,2,1,3)
+        gl_color.addWidget(self.lbl_header_alpha,3,5,1,1)
+        gl_color.addWidget(QLabel("背景不透明度："),4,0,1,2)
+        gl_color.addWidget(self.slider_bg_alpha,4,2,1,3)
+        gl_color.addWidget(self.lbl_bg_alpha,4,5,1,1)
+        gl_color.addWidget(QLabel("整体不透明度："),5,0,1,2)
+        gl_color.addWidget(self.slider_win_opacity,5,2,1,3)
+        gl_color.addWidget(self.lbl_win_opacity,5,5,1,1)
         appearance_settings.addWidget(g_color)
 
         # 4.字体/行距
@@ -270,7 +545,7 @@ class SettingsDialog(QDialog):
         self.cmb_family.setCurrentIndex(fi if fi >= 0 else 0)
         # 4.2 滑块：字号
         self.slider_font = QSlider(Qt.Horizontal)
-        self.slider_font.setRange(8, 15)
+        self.slider_font.setRange(MIN_FONT_SIZE, 15)
         self.slider_font.setMinimumWidth(150)
         self.slider_font.setValue(self.win.font.pointSize())
         self.lbl_font = QLabel(f"{self.slider_font.value()} pt")
@@ -313,6 +588,27 @@ class SettingsDialog(QDialog):
         other_settings.addWidget(self.chk_start_on_boot)
         other_settings.addWidget(g_hotkey)
 
+        # 窗口锚点
+        from PySide6.QtWidgets import QRadioButton, QButtonGroup
+        g_anchor = QGroupBox("窗口锚点")
+        g_anchor.setContentsMargins(3,12,3,6)
+        gl_anchor = QHBoxLayout(g_anchor)
+        self.rb_anchor_left = QRadioButton("左对齐")
+        self.rb_anchor_right = QRadioButton("右对齐")
+        cur_anchor = getattr(self.win, 'anchor', 'left')
+        if cur_anchor == 'right':
+            self.rb_anchor_right.setChecked(True)
+        else:
+            self.rb_anchor_left.setChecked(True)
+        self._anchor_group = QButtonGroup(self)
+        self._anchor_group.addButton(self.rb_anchor_left)
+        self._anchor_group.addButton(self.rb_anchor_right)
+        gl_anchor.addWidget(QLabel("指标变化时保持："))
+        gl_anchor.addWidget(self.rb_anchor_left)
+        gl_anchor.addWidget(self.rb_anchor_right)
+        gl_anchor.addStretch(1)
+        other_settings.addWidget(g_anchor)
+
         # 程序图标选择
         g_icon = QGroupBox("程序图标")
         g_icon.setContentsMargins(3,12,3,6)
@@ -343,14 +639,23 @@ class SettingsDialog(QDialog):
         self.btn_del.clicked.connect(self._del_code)
         self.btn_up.clicked.connect(self._move_up)
         self.btn_dn.clicked.connect(self._move_down)
+        self.btn_cost.clicked.connect(self._open_cost_dialog_for_current)
+        self.btn_alert.clicked.connect(self._open_alert_dialog_for_current)
+        self.list_codes.itemSelectionChanged.connect(self._on_list_selection_changed)
+        self.list_codes.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.list_codes.customContextMenuRequested.connect(self._on_list_context_menu)
         # 连接：其它设置
         self.cmb_interval.currentIndexChanged.connect(self._on_interval_changed)
         self.cmb_namelength.currentIndexChanged.connect(self._on_name_length_changed)
-        self.chk_default_color.toggled.connect(self._on_default_color_toggled)
+        self.btn_up_color.clicked.connect(self.pick_up_color)
+        self.btn_down_color.clicked.connect(self.pick_down_color)
         self.btn_fg.clicked.connect(self.pick_fg)
         self.btn_bg.clicked.connect(self.pick_bg)
+        self.btn_reset_colors.clicked.connect(self._on_reset_colors)
         self.slider_bg_alpha.valueChanged.connect(self.apply_bg_alpha)
         self.slider_win_opacity.valueChanged.connect(self.apply_win_opacity)
+        self.slider_grid_alpha.valueChanged.connect(self.apply_grid_alpha)
+        self.slider_header_alpha.valueChanged.connect(self.apply_header_alpha)
         self.cmb_family.currentTextChanged.connect(self._on_family_changed)
         self.slider_font.valueChanged.connect(self.apply_font_size)
         self.slider_line.valueChanged.connect(self._on_line_changed)
@@ -380,6 +685,19 @@ class SettingsDialog(QDialog):
         self.tabs.currentChanged.connect(self._apply_tab_size)
         self.cmb_b1s1_display.currentIndexChanged.connect(self._on_b1s1_display_changed)
         self.cb_short_code.stateChanged.connect(self._on_short_code_toggled)
+        # 符号设置连接
+        self.edit_sym_high.textChanged.connect(self._on_symbols_changed)
+        self.edit_sym_low.textChanged.connect(self._on_symbols_changed)
+        self.edit_sym_limit_up.textChanged.connect(self._on_symbols_changed)
+        self.edit_sym_limit_down.textChanged.connect(self._on_symbols_changed)
+        self.edit_sym_rise.textChanged.connect(self._on_symbols_changed)
+        self.edit_sym_fall.textChanged.connect(self._on_symbols_changed)
+        # 双模式切换连接
+        self.chk_dual_mode.toggled.connect(self._on_dual_mode_toggled)
+        self.cmb_leave_delay.currentIndexChanged.connect(self._on_leave_delay_changed)
+        # 锚点连接
+        self.rb_anchor_left.toggled.connect(self._on_anchor_changed)
+        self.rb_anchor_right.toggled.connect(self._on_anchor_changed)
 
     def _on_start_on_boot_toggled(self, checked: bool):
         try:
@@ -483,16 +801,85 @@ class SettingsDialog(QDialog):
             self.list_codes.setCurrentRow(row+1)
             self._on_codes_changed(None)
 
+    # —— 设置成本 —— #
+    def _on_list_selection_changed(self):
+        has = self.list_codes.currentItem() is not None
+        self.btn_cost.setEnabled(has)
+        self.btn_alert.setEnabled(has)
+
+    def _on_list_context_menu(self, pos):
+        item = self.list_codes.itemAt(pos)
+        if item is None:
+            return
+        self.list_codes.setCurrentItem(item)
+        menu = QMenu(self.list_codes)
+        act = QAction("设置成本…", menu)
+        act.triggered.connect(lambda: self._open_cost_dialog_for_item(item))
+        menu.addAction(act)
+        act_alert = QAction("封单预警…", menu)
+        act_alert.triggered.connect(lambda: self._open_alert_dialog_for_item(item))
+        menu.addAction(act_alert)
+        menu.exec(self.list_codes.viewport().mapToGlobal(pos))
+
+    def _open_cost_dialog_for_current(self):
+        item = self.list_codes.currentItem()
+        if item is not None:
+            self._open_cost_dialog_for_item(item)
+
+    def _open_cost_dialog_for_item(self, item: QListWidgetItem):
+        raw = item.text().strip()
+        code = self._normalize_code_or_none(raw) or raw.lower()
+        if not code:
+            return
+        existing = {}
+        try:
+            existing = self.win.get_cost(code) or {}
+        except Exception:
+            existing = {}
+        dlg = CostDialog(self, code,
+                         float(existing.get("cost", 0.0) or 0.0),
+                         int(existing.get("qty", 0) or 0))
+        if dlg.exec() == QDialog.Accepted:
+            cost, qty = dlg.get_values()
+            try:
+                self.win.set_cost(code, cost, qty)
+            except Exception:
+                pass
+
+    def _open_alert_dialog_for_current(self):
+        item = self.list_codes.currentItem()
+        if item is not None:
+            self._open_alert_dialog_for_item(item)
+
+    def _open_alert_dialog_for_item(self, item: QListWidgetItem):
+        raw = item.text().strip()
+        code = self._normalize_code_or_none(raw) or raw.lower()
+        if not code:
+            return
+        existing = []
+        try:
+            existing = self.win.get_alert(code) or []
+        except Exception:
+            existing = []
+        dlg = AlertDialog(self, code, existing)
+        if dlg.exec() == QDialog.Accepted:
+            try:
+                self.win.set_alert(code, dlg.get_thresholds())
+            except Exception:
+                pass
+
     # —— 其它槽 —— #
     def _on_interval_changed(self, idx):
         seconds = self.cmb_interval.currentData()
         if isinstance(seconds,int): 
             self.win.set_refresh_interval(seconds)
 
-    def _on_default_color_toggled(self, checked: bool):
-        self.btn_fg.setEnabled(not checked)
-        self.win.set_default_color(bool(checked))
-    
+    def _on_reset_colors(self):
+        try:
+            self.win.reset_default_colors()
+        except Exception:
+            pass
+
     def _on_grid_toggled(self, checked: bool):
         self.win.set_grid_visible(bool(checked))
 
@@ -525,13 +912,49 @@ class SettingsDialog(QDialog):
         self.win.set_flag("买一", state)
         self.cmb_b1s1_display.setEnabled(state)
 
+    def _on_symbols_changed(self):
+        self.win.set_symbols(
+            self.edit_sym_high.text(),
+            self.edit_sym_low.text(),
+            self.edit_sym_limit_up.text(),
+            self.edit_sym_limit_down.text(),
+            sym_rise=self.edit_sym_rise.text(),
+            sym_fall=self.edit_sym_fall.text(),
+        )
+
+    def _on_dual_mode_toggled(self, checked: bool):
+        self.win.set_dual_mode_enabled(bool(checked))
+        self._g_simple_flags.setEnabled(bool(checked))
+        self.cmb_leave_delay.setEnabled(bool(checked))
+
+    def _on_leave_delay_changed(self, idx: int):
+        ms = self.cmb_leave_delay.currentData()
+        if isinstance(ms, int):
+            self.win.set_leave_delay_ms(ms)
+
+    def _on_anchor_changed(self, _checked: bool):
+        try:
+            anchor = 'right' if self.rb_anchor_right.isChecked() else 'left'
+            self.win.set_anchor(anchor)
+        except Exception:
+            pass
+
+    def _on_simple_cb_changed(self, header: str, state: bool):
+        self.win.set_simple_flag(header, state)
+
     def _apply_tab_size(self, index: int):
         size = self.tab_sizes.get(index, QSize(400, 400))
         self.setFixedSize(size)
 
     def pick_fg(self):
-        c = QColorDialog.getColor(self.win.fg, self, "选择文字颜色")
+        c = QColorDialog.getColor(self.win.fg, self, "选择表格颜色")
         if c.isValid(): self.win.set_fg_color(c)
+    def pick_up_color(self):
+        c = QColorDialog.getColor(self.win.up_color, self, "选择涨颜色")
+        if c.isValid(): self.win.set_up_color(c)
+    def pick_down_color(self):
+        c = QColorDialog.getColor(self.win.down_color, self, "选择跌颜色")
+        if c.isValid(): self.win.set_down_color(c)
     def pick_bg(self):
         base = QColor(self.win.bg)
         base.setAlpha(255)
@@ -543,6 +966,12 @@ class SettingsDialog(QDialog):
     def apply_win_opacity(self, v): 
         self.lbl_win_opacity.setText(f"{v}%")
         self.win.set_window_opacity_percent(v)
+    def apply_grid_alpha(self, v):
+        self.lbl_grid_alpha.setText(f"{v}%")
+        self.win.set_grid_alpha_percent(v)
+    def apply_header_alpha(self, v):
+        self.lbl_header_alpha.setText(f"{v}%")
+        self.win.set_header_alpha_percent(v)
     def _on_family_changed(self, fam: str): 
         self.win.set_font_family(fam)
     def apply_font_size(self, v):

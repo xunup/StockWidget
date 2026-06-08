@@ -1,0 +1,16 @@
+[project]
+name = "stockwidget"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.14"
+dependencies = [
+    "PySide6>=6.7.0",
+    "requests>=2.32.0",
+    "keyboard>=0.13.5",
+]
+
+[dependency-groups]
+build = [
+    "pyinstaller>=6.20.0",
+]
