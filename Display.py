@@ -65,6 +65,10 @@ class SimpleTableModel(QAbstractTableModel):
                 sign = int(meta.get("s1", 0))
             elif header == "盈亏":
                 sign = int(meta.get("pnl", 0))
+            elif header == "日高":
+                sign = int(meta.get("high", 0))
+            elif header == "日低":
+                sign = int(meta.get("low", 0))
             else:
                 return self.table_color
 

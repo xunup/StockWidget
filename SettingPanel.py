@@ -188,10 +188,11 @@ class SettingsDialog(QDialog):
         main.addWidget(self.tabs)
 
         self.tab_sizes = {
-            0: QSize(300, 300),
+            0: QSize(480, 300),
             1: QSize(480, 750),
-            2: QSize(400, 460),
-            3: QSize(300, 280),
+            2: QSize(480, 460),
+            3: QSize(480, 280),
+            4: QSize(480, 720),
         }
         self._apply_tab_size(0)
 
@@ -365,7 +366,7 @@ class SettingsDialog(QDialog):
         gl_flag_deal = QGridLayout(g_flag_deal)
         gl_flag_deal.setHorizontalSpacing(6)
         gl_flag_deal.setVerticalSpacing(6)
-        for i, idx in enumerate(range(9,12)):
+        for i, idx in enumerate(range(9,14)):
             cb = QCheckBox(cb_texts[idx])
             cb.setChecked(self.win.header_is_visible(cb_texts[idx]))
             cb.stateChanged.connect(partial(self._on_cb_changed, cb_texts[idx]))
@@ -377,12 +378,12 @@ class SettingsDialog(QDialog):
         gl_flag_other = QGridLayout(g_flag_other)
         gl_flag_other.setHorizontalSpacing(6)
         gl_flag_other.setVerticalSpacing(6)
-        for i in range(12,13):
+        for i in range(14,15):
             cb = QCheckBox(cb_texts[i])
             cb.setChecked(self.win.header_is_visible(cb_texts[i]))
             cb.stateChanged.connect(partial(self._on_cb_changed, cb_texts[i]))
             self.cbs.append(cb)
-            gl_flag_other.addWidget(cb, i-12, 0)
+            gl_flag_other.addWidget(cb, i-14, 0)
         gl_flags.addWidget(g_flag_other, 2, 0)
 
         data_settings.addWidget(g_flags)
@@ -394,8 +395,8 @@ class SettingsDialog(QDialog):
         gl_simple.setHorizontalSpacing(6)
         gl_simple.setVerticalSpacing(6)
         self.simple_cbs: list[QCheckBox] = []
-        simple_headers = ["代码", "名称", "现价", "涨跌值", "涨跌幅", "盈亏", "买一/卖一", "委比", "成交量", "成交额", "均价", "K线"]
-        simple_header_keys = ["代码", "名称", "现价", "涨跌值", "涨跌幅", "盈亏", "买一", "委比", "成交量", "成交额", "均价", "K线"]
+        simple_headers = ["代码", "名称", "现价", "涨跌值", "涨跌幅", "盈亏", "买一/卖一", "委比", "成交量", "成交额", "均价", "日高", "日低", "K线"]
+        simple_header_keys = ["代码", "名称", "现价", "涨跌值", "涨跌幅", "盈亏", "买一", "委比", "成交量", "成交额", "均价", "日高", "日低", "K线"]
         for i, (label, key) in enumerate(zip(simple_headers, simple_header_keys)):
             cb = QCheckBox(label)
             cb.setChecked(self.win.simple_header_is_visible(key))
@@ -632,6 +633,198 @@ class SettingsDialog(QDialog):
 
         self.tabs.addTab(tab_3, "常规")
 
+        # ---- 第五页：报警 ----
+        tab_4 = QWidget()
+        alert_settings = QVBoxLayout(tab_4)
+
+        # 涨跌异动报警
+        g_price_alert = QGroupBox("涨跌异动报警")
+        g_price_alert.setContentsMargins(3, 12, 3, 6)
+        gl_pa = QVBoxLayout(g_price_alert)
+        gl_pa.setSpacing(8)
+
+        # 启用开关
+        self.chk_price_alert = QCheckBox("启用涨跌异动报警")
+        self.chk_price_alert.setChecked(bool(self.win.price_alert_enabled))
+        gl_pa.addWidget(self.chk_price_alert)
+
+        # 规则列表
+        self.list_pa_rules = QListWidget()
+        self.list_pa_rules.setFixedHeight(100)
+        for rule in self.win.price_alert_rules:
+            self._add_pa_rule_item(rule)
+        gl_pa.addWidget(self.list_pa_rules)
+
+        # 添加规则区域
+        add_row = QGridLayout()
+        add_row.setHorizontalSpacing(6)
+        add_row.setVerticalSpacing(4)
+        add_row.addWidget(QLabel("周期:"), 0, 0)
+        self.cmb_pa_period = QComboBox()
+        self.cmb_pa_period.setFixedWidth(90)
+        for sec in [1, 3, 5, 10, 20, 30, 60, 120, 180, 300, 600]:
+            if sec < 60:
+                self.cmb_pa_period.addItem(f"{sec}秒", userData=sec)
+            else:
+                self.cmb_pa_period.addItem(f"{sec//60}分钟", userData=sec)
+        self.cmb_pa_period.setCurrentIndex(5)  # 默认30秒
+        add_row.addWidget(self.cmb_pa_period, 0, 1)
+
+        add_row.addWidget(QLabel("阈值:"), 0, 2)
+        self.edit_pa_threshold = QLineEdit("2.0")
+        self.edit_pa_threshold.setFixedWidth(60)
+        self.edit_pa_threshold.setPlaceholderText("%")
+        th_validator = QDoubleValidator(0.1, 50.0, 2, self)
+        th_validator.setNotation(QDoubleValidator.StandardNotation)
+        self.edit_pa_threshold.setValidator(th_validator)
+        add_row.addWidget(self.edit_pa_threshold, 0, 3)
+        add_row.addWidget(QLabel("%"), 0, 4)
+
+        add_row.addWidget(QLabel("冷却:"), 1, 0)
+        self.cmb_pa_cooldown = QComboBox()
+        self.cmb_pa_cooldown.setFixedWidth(90)
+        for sec in [1, 3, 5, 10, 15, 30, 60, 120, 180, 300, 600]:
+            if sec < 60:
+                self.cmb_pa_cooldown.addItem(f"{sec}秒", userData=sec)
+            else:
+                self.cmb_pa_cooldown.addItem(f"{sec//60}分钟", userData=sec)
+        self.cmb_pa_cooldown.setCurrentIndex(5)  # 默认30秒
+        add_row.addWidget(self.cmb_pa_cooldown, 1, 1)
+
+        self.btn_pa_add = QPushButton("添加规则")
+        self.btn_pa_add.setFixedWidth(70)
+        add_row.addWidget(self.btn_pa_add, 1, 2, 1, 2)
+        self.btn_pa_del = QPushButton("删除")
+        self.btn_pa_del.setFixedWidth(50)
+        add_row.addWidget(self.btn_pa_del, 1, 4)
+        gl_pa.addLayout(add_row)
+
+        # 说明
+        tip_pa = QLabel("在监测周期内，若股票价格波动超过阈值，\n"
+                        "将发出系统通知。冷却时间内同一股票不重复报警。")
+        tip_pa.setWordWrap(True)
+        tip_pa.setStyleSheet("color: #888;")
+        gl_pa.addWidget(tip_pa)
+
+        alert_settings.addWidget(g_price_alert)
+
+        # 新高新低报警
+        g_nhl_alert = QGroupBox("新高新低报警")
+        g_nhl_alert.setContentsMargins(3, 12, 3, 6)
+        gl_nhl = QVBoxLayout(g_nhl_alert)
+        gl_nhl.setSpacing(8)
+
+        # 启用开关
+        self.chk_nhl_alert = QCheckBox("启用新高新低报警")
+        self.chk_nhl_alert.setChecked(bool(self.win.new_high_low_alert_enabled))
+        gl_nhl.addWidget(self.chk_nhl_alert)
+
+        # 新高/新低分别开关
+        nhl_chk_row = QHBoxLayout()
+        self.chk_new_high = QCheckBox("新高报警")
+        self.chk_new_high.setChecked(bool(self.win.new_high_alert))
+        nhl_chk_row.addWidget(self.chk_new_high)
+        self.chk_new_low = QCheckBox("新低报警")
+        self.chk_new_low.setChecked(bool(self.win.new_low_alert))
+        nhl_chk_row.addWidget(self.chk_new_low)
+        nhl_chk_row.addStretch(1)
+        gl_nhl.addLayout(nhl_chk_row)
+
+        # 冷却时间
+        nhl_cd_row = QHBoxLayout()
+        nhl_cd_row.addWidget(QLabel("冷却时间:"))
+        self.cmb_nhl_cooldown = QComboBox()
+        self.cmb_nhl_cooldown.setFixedWidth(90)
+        nhl_cd_options = [5, 10, 15, 30, 60, 120, 180, 300, 600]
+        for sec in nhl_cd_options:
+            if sec < 60:
+                self.cmb_nhl_cooldown.addItem(f"{sec}秒", userData=sec)
+            else:
+                self.cmb_nhl_cooldown.addItem(f"{sec//60}分钟", userData=sec)
+        # 设置当前值
+        cur_cd = self.win.new_high_low_cooldown
+        for i in range(self.cmb_nhl_cooldown.count()):
+            if self.cmb_nhl_cooldown.itemData(i) == cur_cd:
+                self.cmb_nhl_cooldown.setCurrentIndex(i)
+                break
+        nhl_cd_row.addWidget(self.cmb_nhl_cooldown)
+        nhl_cd_row.addStretch(1)
+        gl_nhl.addLayout(nhl_cd_row)
+
+        # 说明
+        tip_nhl = QLabel("当股票价格创当日新高或新低时发出系统通知。\n"
+                         "冷却时间内同一股票不重复报警。")
+        tip_nhl.setWordWrap(True)
+        tip_nhl.setStyleSheet("color: #888;")
+        gl_nhl.addWidget(tip_nhl)
+
+        alert_settings.addWidget(g_nhl_alert)
+
+        # 涨跌停通知
+        g_limit_alert = QGroupBox("涨跌停通知")
+        g_limit_alert.setContentsMargins(3, 12, 3, 6)
+        gl_la = QVBoxLayout(g_limit_alert)
+        gl_la.setSpacing(8)
+
+        # 启用开关
+        self.chk_limit_alert = QCheckBox("启用涨跌停通知")
+        self.chk_limit_alert.setChecked(bool(self.win.limit_alert_enabled))
+        gl_la.addWidget(self.chk_limit_alert)
+
+        # 到达/离开分别开关
+        la_chk_row1 = QHBoxLayout()
+        self.chk_reach_limit_up = QCheckBox("到达涨停")
+        self.chk_reach_limit_up.setChecked(bool(self.win.limit_alert_reach_up))
+        la_chk_row1.addWidget(self.chk_reach_limit_up)
+        self.chk_reach_limit_down = QCheckBox("到达跌停")
+        self.chk_reach_limit_down.setChecked(bool(self.win.limit_alert_reach_down))
+        la_chk_row1.addWidget(self.chk_reach_limit_down)
+        la_chk_row1.addStretch(1)
+        gl_la.addLayout(la_chk_row1)
+
+        la_chk_row2 = QHBoxLayout()
+        self.chk_leave_limit_up = QCheckBox("离开涨停")
+        self.chk_leave_limit_up.setChecked(bool(self.win.limit_alert_leave_up))
+        la_chk_row2.addWidget(self.chk_leave_limit_up)
+        self.chk_leave_limit_down = QCheckBox("离开跌停")
+        self.chk_leave_limit_down.setChecked(bool(self.win.limit_alert_leave_down))
+        la_chk_row2.addWidget(self.chk_leave_limit_down)
+        la_chk_row2.addStretch(1)
+        gl_la.addLayout(la_chk_row2)
+
+        # 冷却时间
+        la_cd_row = QHBoxLayout()
+        la_cd_row.addWidget(QLabel("冷却时间:"))
+        self.cmb_limit_alert_cooldown = QComboBox()
+        self.cmb_limit_alert_cooldown.setFixedWidth(90)
+        la_cd_options = [5, 10, 15, 30, 60, 120, 180, 300, 600]
+        for sec in la_cd_options:
+            if sec < 60:
+                self.cmb_limit_alert_cooldown.addItem(f"{sec}秒", userData=sec)
+            else:
+                self.cmb_limit_alert_cooldown.addItem(f"{sec//60}分钟", userData=sec)
+        # 设置当前值
+        cur_la_cd = self.win.limit_alert_cooldown
+        for i in range(self.cmb_limit_alert_cooldown.count()):
+            if self.cmb_limit_alert_cooldown.itemData(i) == cur_la_cd:
+                self.cmb_limit_alert_cooldown.setCurrentIndex(i)
+                break
+        la_cd_row.addWidget(self.cmb_limit_alert_cooldown)
+        la_cd_row.addStretch(1)
+        gl_la.addLayout(la_cd_row)
+
+        # 说明
+        tip_la = QLabel("当股票价格到达涨跌停或离开涨跌停时发出系统通知。\n"
+                        "冷却时间内同一股票不重复报警。")
+        tip_la.setWordWrap(True)
+        tip_la.setStyleSheet("color: #888;")
+        gl_la.addWidget(tip_la)
+
+        alert_settings.addWidget(g_limit_alert)
+        alert_settings.addStretch(1)
+
+        self.tabs.addTab(tab_4, "报警")
+
         # ---- 连接 ----
         # 连接：代码列表
         self.list_codes.itemChanged.connect(self._on_codes_changed)
@@ -698,6 +891,22 @@ class SettingsDialog(QDialog):
         # 锚点连接
         self.rb_anchor_left.toggled.connect(self._on_anchor_changed)
         self.rb_anchor_right.toggled.connect(self._on_anchor_changed)
+        # 涨跌异动报警连接
+        self.chk_price_alert.toggled.connect(self._on_price_alert_toggled)
+        self.btn_pa_add.clicked.connect(self._on_pa_add_rule)
+        self.btn_pa_del.clicked.connect(self._on_pa_del_rule)
+        # 新高新低报警连接
+        self.chk_nhl_alert.toggled.connect(self._on_nhl_alert_toggled)
+        self.chk_new_high.toggled.connect(self._on_new_high_toggled)
+        self.chk_new_low.toggled.connect(self._on_new_low_toggled)
+        self.cmb_nhl_cooldown.currentIndexChanged.connect(self._on_nhl_cooldown_changed)
+        # 涨跌停通知连接
+        self.chk_limit_alert.toggled.connect(self._on_limit_alert_toggled)
+        self.chk_reach_limit_up.toggled.connect(self._on_reach_limit_up_toggled)
+        self.chk_reach_limit_down.toggled.connect(self._on_reach_limit_down_toggled)
+        self.chk_leave_limit_up.toggled.connect(self._on_leave_limit_up_toggled)
+        self.chk_leave_limit_down.toggled.connect(self._on_leave_limit_down_toggled)
+        self.cmb_limit_alert_cooldown.currentIndexChanged.connect(self._on_limit_alert_cooldown_changed)
 
     def _on_start_on_boot_toggled(self, checked: bool):
         try:
@@ -943,8 +1152,9 @@ class SettingsDialog(QDialog):
         self.win.set_simple_flag(header, state)
 
     def _apply_tab_size(self, index: int):
-        size = self.tab_sizes.get(index, QSize(400, 400))
-        self.setFixedSize(size)
+        size = self.tab_sizes.get(index, QSize(480, 400))
+        self.setFixedWidth(size.width())
+        self.setFixedHeight(size.height())
 
     def pick_fg(self):
         c = QColorDialog.getColor(self.win.fg, self, "选择表格颜色")
@@ -1018,3 +1228,83 @@ class SettingsDialog(QDialog):
                 # trigger change handler will call app.set_app_icon
         except Exception:
             pass
+
+    # —— 涨跌异动报警槽 --
+    def _on_price_alert_toggled(self, checked: bool):
+        self.win.set_price_alert_enabled(bool(checked))
+
+    def _add_pa_rule_item(self, rule: dict):
+        """向规则列表添加一项。"""
+        period = rule.get("period", 60)
+        threshold = rule.get("threshold", 2.0)
+        cooldown = rule.get("cooldown", 120)
+        if period < 60:
+            p_str = f"{period}秒"
+        else:
+            p_str = f"{period//60}分钟"
+        if cooldown < 60:
+            c_str = f"{cooldown}秒"
+        else:
+            c_str = f"{cooldown//60}分钟"
+        label = f"周期 {p_str} | 阈值 {threshold:g}% | 冷却 {c_str}"
+        item = QListWidgetItem(label)
+        item.setData(Qt.UserRole, rule)
+        self.list_pa_rules.addItem(item)
+
+    def _on_pa_add_rule(self):
+        """Read UI values and add a new rule."""
+        try:
+            period = self.cmb_pa_period.currentData()
+            threshold_txt = self.edit_pa_threshold.text().strip()
+            threshold = float(threshold_txt) if threshold_txt else 2.0
+            cooldown = self.cmb_pa_cooldown.currentData()
+            if not isinstance(period, int) or not isinstance(cooldown, int):
+                return
+            rule = {"period": period, "threshold": threshold, "cooldown": cooldown}
+            self._add_pa_rule_item(rule)
+            self.win.add_price_alert_rule(period, threshold, cooldown)
+        except Exception:
+            pass
+
+    def _on_pa_del_rule(self):
+        """Delete selected rule."""
+        row = self.list_pa_rules.currentRow()
+        if row >= 0:
+            self.list_pa_rules.takeItem(row)
+            self.win.remove_price_alert_rule(row)
+
+    # —— 新高新低报警槽 --
+    def _on_nhl_alert_toggled(self, checked: bool):
+        self.win.set_new_high_low_alert_enabled(bool(checked))
+
+    def _on_new_high_toggled(self, checked: bool):
+        self.win.set_new_high_alert(bool(checked))
+
+    def _on_new_low_toggled(self, checked: bool):
+        self.win.set_new_low_alert(bool(checked))
+
+    def _on_nhl_cooldown_changed(self, index: int):
+        sec = self.cmb_nhl_cooldown.currentData()
+        if isinstance(sec, int):
+            self.win.set_new_high_low_cooldown(sec)
+
+    # —— 涨跌停通知槽 --
+    def _on_limit_alert_toggled(self, checked: bool):
+        self.win.set_limit_alert_enabled(bool(checked))
+
+    def _on_reach_limit_up_toggled(self, checked: bool):
+        self.win.set_limit_alert_reach_up(bool(checked))
+
+    def _on_reach_limit_down_toggled(self, checked: bool):
+        self.win.set_limit_alert_reach_down(bool(checked))
+
+    def _on_leave_limit_up_toggled(self, checked: bool):
+        self.win.set_limit_alert_leave_up(bool(checked))
+
+    def _on_leave_limit_down_toggled(self, checked: bool):
+        self.win.set_limit_alert_leave_down(bool(checked))
+
+    def _on_limit_alert_cooldown_changed(self, index: int):
+        sec = self.cmb_limit_alert_cooldown.currentData()
+        if isinstance(sec, int):
+            self.win.set_limit_alert_cooldown(sec)

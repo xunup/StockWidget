@@ -1,4 +1,5 @@
-import requests, keyboard
+import requests, keyboard, time
+from collections import deque
 from functools import partial
 
 from PySide6.QtCore import Qt, QEvent, QTimer, Signal, QPoint
@@ -110,10 +111,62 @@ class FloatLabel(QWidget):
                 except Exception:
                     pass
 
+        # 涨跌异动报警配置
+        price_alert_cfg = cfg.get("price_alert", {}) or {}
+        self.price_alert_enabled = bool(price_alert_cfg.get("enabled", False))  # 全局开关
+        # 多规则列表：[{"period": int, "threshold": float, "cooldown": int}, ...]
+        rules_cfg = price_alert_cfg.get("rules", None)
+        if isinstance(rules_cfg, list) and rules_cfg:
+            self.price_alert_rules = []
+            for r in rules_cfg:
+                try:
+                    self.price_alert_rules.append({
+                        "period": max(1, int(r.get("period", 60))),
+                        "threshold": max(0.1, float(r.get("threshold", 2.0))),
+                        "cooldown": max(1, int(r.get("cooldown", 120))),
+                    })
+                except Exception:
+                    pass
+        else:
+            # 兼容旧单规则配置
+            self.price_alert_rules = [{
+                "period": max(1, int(price_alert_cfg.get("period", 60))),
+                "threshold": max(0.1, float(price_alert_cfg.get("threshold", 2.0))),
+                "cooldown": max(1, int(price_alert_cfg.get("cooldown", 120))),
+            }]
+        # 价格历史：{code: deque([(timestamp, price), ...])}
+        self._price_history = {}
+        # 冷却记录：{(code, rule_index): last_fire_timestamp}
+        self._price_alert_cooldowns = {}
+
+        # 新高新低报警配置
+        nhl_cfg = cfg.get("new_high_low_alert", {}) or {}
+        self.new_high_low_alert_enabled = bool(nhl_cfg.get("enabled", False))
+        self.new_high_alert = bool(nhl_cfg.get("new_high", True))  # 新高报警开关
+        self.new_low_alert = bool(nhl_cfg.get("new_low", True))   # 新低报警开关
+        self.new_high_low_cooldown = max(1, int(nhl_cfg.get("cooldown", 60)))  # 冷却秒数
+        # 状态追踪：{code: {"high": last_known_high, "low": last_known_low}}
+        self._nhl_last_known = {}
+        # 冷却记录：{(code, "high"/"low"): last_fire_timestamp}
+        self._nhl_cooldowns = {}
+
+        # 涨跌停通知配置
+        limit_alert_cfg = cfg.get("limit_alert", {}) or {}
+        self.limit_alert_enabled = bool(limit_alert_cfg.get("enabled", False))  # 全局开关
+        self.limit_alert_reach_up = bool(limit_alert_cfg.get("reach_up", True))  # 到达涨停通知
+        self.limit_alert_reach_down = bool(limit_alert_cfg.get("reach_down", True))  # 到达跌停通知
+        self.limit_alert_leave_up = bool(limit_alert_cfg.get("leave_up", True))  # 离开涨停通知
+        self.limit_alert_leave_down = bool(limit_alert_cfg.get("leave_down", True))  # 离开跌停通知
+        self.limit_alert_cooldown = max(1, int(limit_alert_cfg.get("cooldown", 30)))  # 冷却秒数
+        # 状态追踪：{code: {"is_limit_up": bool, "is_limit_down": bool}}
+        self._limit_alert_state = {}
+        # 冷却记录：{(code, "reach_up"/"reach_down"/"leave_up"/"leave_down"): last_fire_timestamp}
+        self._limit_alert_cooldowns = {}
+
         # 设置初值
         self.codes = [str(c).strip() for c in codes_cfg if str(c).strip()]
         # 列标题列表（提前定义，供后续旧配置解析使用）
-        self.ALL_HEADERS = ["代码", "名称", "现价", "涨跌值", "涨跌幅", "盈亏", "买一", "卖一", "委比", "成交量", "成交额", "均价", "K线"]
+        self.ALL_HEADERS = ["代码", "名称", "现价", "涨跌值", "涨跌幅", "盈亏", "买一", "卖一", "委比", "成交量", "成交额", "均价", "日高", "日低", "K线"]
 
         # 列显示标志（独立属性）
         # 解析旧 flags 配置以做回退
@@ -137,6 +190,8 @@ class FloatLabel(QWidget):
         self.vol_visible = bool(cfg.get("vol_visible", old_flags.get("成交量", False)))
         self.amount_visible = bool(cfg.get("amount_visible", old_flags.get("成交额", False)))
         self.avg_visible = bool(cfg.get("avg_visible", old_flags.get("均价", False)))
+        self.high_visible = bool(cfg.get("high_visible", old_flags.get("日高", False)))
+        self.low_visible = bool(cfg.get("low_visible", old_flags.get("日低", False)))
         self.kline_visible = bool(cfg.get("kline_visible", old_flags.get("K线", False)))
         self.pnl_visible = bool(cfg.get("pnl_visible", False))
 
@@ -152,6 +207,8 @@ class FloatLabel(QWidget):
         self.simple_vol_visible = bool(simple_cfg.get("成交量", False))
         self.simple_amount_visible = bool(simple_cfg.get("成交额", False))
         self.simple_avg_visible = bool(simple_cfg.get("均价", False))
+        self.simple_high_visible = bool(simple_cfg.get("日高", False))
+        self.simple_low_visible = bool(simple_cfg.get("日低", False))
         self.simple_kline_visible = bool(simple_cfg.get("K线", False))
         self.simple_pnl_visible = bool(simple_cfg.get("盈亏", False))
 
@@ -297,6 +354,8 @@ class FloatLabel(QWidget):
             "vol_visible": bool(getattr(self, 'vol_visible', False)),
             "amount_visible": bool(getattr(self, 'amount_visible', False)),
             "avg_visible": bool(getattr(self, 'avg_visible', False)),
+            "high_visible": bool(getattr(self, 'high_visible', False)),
+            "low_visible": bool(getattr(self, 'low_visible', False)),
             "kline_visible": bool(getattr(self, 'kline_visible', False)),
             "pnl_visible": bool(getattr(self, 'pnl_visible', False)),
             "cost_data": dict(getattr(self, 'cost_data', {}) or {}),
@@ -341,8 +400,28 @@ class FloatLabel(QWidget):
                 "成交量": bool(self.simple_vol_visible),
                 "成交额": bool(self.simple_amount_visible),
                 "均价": bool(self.simple_avg_visible),
+                "日高": bool(self.simple_high_visible),
+                "日低": bool(self.simple_low_visible),
                 "K线": bool(self.simple_kline_visible),
                 "盈亏": bool(self.simple_pnl_visible),
+            },
+            "price_alert": {
+                "enabled": bool(self.price_alert_enabled),
+                "rules": list(self.price_alert_rules),
+            },
+            "new_high_low_alert": {
+                "enabled": bool(self.new_high_low_alert_enabled),
+                "new_high": bool(self.new_high_alert),
+                "new_low": bool(self.new_low_alert),
+                "cooldown": int(self.new_high_low_cooldown),
+            },
+            "limit_alert": {
+                "enabled": bool(self.limit_alert_enabled),
+                "reach_up": bool(self.limit_alert_reach_up),
+                "reach_down": bool(self.limit_alert_reach_down),
+                "leave_up": bool(self.limit_alert_leave_up),
+                "leave_down": bool(self.limit_alert_leave_down),
+                "cooldown": int(self.limit_alert_cooldown),
             },
         }
 
@@ -369,6 +448,10 @@ class FloatLabel(QWidget):
                 return bool(getattr(self, 'amount_visible', False))
             if header == "均价":
                 return bool(getattr(self, 'avg_visible', False))
+            if header == "日高":
+                return bool(getattr(self, 'high_visible', False))
+            if header == "日低":
+                return bool(getattr(self, 'low_visible', False))
             if header == "K线":
                 return bool(getattr(self, 'kline_visible', False))
             if header == "盈亏":
@@ -408,6 +491,10 @@ class FloatLabel(QWidget):
                 return bool(self.simple_amount_visible)
             if header == "均价":
                 return bool(self.simple_avg_visible)
+            if header == "日高":
+                return bool(self.simple_high_visible)
+            if header == "日低":
+                return bool(self.simple_low_visible)
             if header == "K线":
                 return bool(self.simple_kline_visible)
             if header == "盈亏":
@@ -745,6 +832,24 @@ class FloatLabel(QWidget):
             except Exception:
                 pass
 
+            # 涨跌异动报警检测
+            try:
+                self._check_price_alert(code, name, current_price, prev_close)
+            except Exception:
+                pass
+
+            # 新高新低报警检测
+            try:
+                self._check_new_high_low_alert(code, name, current_price, high_price, low_price)
+            except Exception:
+                pass
+
+            # 涨跌停通知检测
+            try:
+                self._check_limit_alert(code, name, current_price, limit_up, limit_down, dec)
+            except Exception:
+                pass
+
             k_payload = {"k": (opening_price, current_price, high_price, low_price, prev_close)}
 
             # 计算盈亏：(现价 - 成本) * 持仓数量
@@ -760,7 +865,7 @@ class FloatLabel(QWidget):
             # 委比格式化
             commi_label = self._fmt_signed(committee, 2) + "%"
 
-            # "代码", "名称", "现价", "涨跌值", "涨跌幅", "盈亏", "买一", "卖一", "委比", "成交量", "成交额", "均价",  "K线"
+            # "代码", "名称", "现价", "涨跌值", "涨跌幅", "盈亏", "买一", "卖一", "委比", "成交量", "成交额", "均价", "日高", "日低", "K线"
             if code[2] not in ('1','5'):
                 chg_fmt = self._fmt_signed(change, 2)
                 pct_fmt = self._fmt_signed(change_pct, 2) + "%"
@@ -777,6 +882,8 @@ class FloatLabel(QWidget):
                     f"{deals_vol}" if deals_vol<1e4 else (f"{deals_vol/1e4:.2f}万" if deals_vol<1e8 else f"{deals_vol/1e8:.2f}亿"),
                     f"{deals_amt/1e4:.2f}万" if deals_amt<1e8 else (f"{deals_amt/1e8:.2f}亿" if deals_amt<1e12 else f"{deals_amt/1e12:.2f}万亿"),
                     f"{avg:.2f}",
+                    f"{high_price:.2f}",
+                    f"{low_price:.2f}",
                     k_payload
                 ])
             else:
@@ -795,6 +902,8 @@ class FloatLabel(QWidget):
                     f"{deals_vol}" if deals_vol<1e4 else (f"{deals_vol/1e4:.2f}万" if deals_vol<1e8 else f"{deals_vol/1e8:.2f}亿"),
                     f"{deals_amt/1e4:.2f}万" if deals_amt<1e8 else (f"{deals_amt/1e8:.2f}亿" if deals_amt<1e12 else f"{deals_amt/1e12:.2f}万亿"),
                     f"{avg:.3f}",
+                    f"{high_price:.3f}",
+                    f"{low_price:.3f}",
                     k_payload
                 ])
             sign_data.append({
@@ -804,6 +913,8 @@ class FloatLabel(QWidget):
                 "b1": b1_color_sign,
                 "s1": s1_color_sign,
                 "pnl": pnl_sign,
+                "high": (high_price > prev_close) - (high_price < prev_close) if prev_close else 0,
+                "low": (low_price > prev_close) - (low_price < prev_close) if prev_close else 0,
             })
         
         return price_data, sign_data
@@ -931,6 +1042,10 @@ class FloatLabel(QWidget):
                 prev = bool(getattr(self, 'amount_visible', False)); self.amount_visible = checked
             elif header == "均价":
                 prev = bool(getattr(self, 'avg_visible', False)); self.avg_visible = checked
+            elif header == "日高":
+                prev = bool(getattr(self, 'high_visible', False)); self.high_visible = checked
+            elif header == "日低":
+                prev = bool(getattr(self, 'low_visible', False)); self.low_visible = checked
             elif header == "K线":
                 prev = bool(getattr(self, 'kline_visible', False)); self.kline_visible = checked
             elif header == "盈亏":
@@ -1137,6 +1252,185 @@ class FloatLabel(QWidget):
                             msg = f"{code} 当前封单 {seal_down_lots}手 < {req}手"
                         self._fire_alert(title, msg)
 
+    def _check_price_alert(self, code, name, current_price, prev_close):
+        """涨跌异动报警：对每条规则独立检测，在配置的周期内若价格波动超过阈值则发出通知。"""
+        if not self.price_alert_enabled:
+            return
+        if current_price <= 0 or prev_close <= 0:
+            return
+        if not self.price_alert_rules:
+            return
+
+        key = (code or "").strip().lower()
+        now = time.time()
+
+        # 记录价格历史（统一维护，保留最大周期所需数据）
+        if key not in self._price_history:
+            self._price_history[key] = deque()
+
+        history = self._price_history[key]
+        history.append((now, current_price))
+
+        # 清除超出所有规则最大周期的老数据
+        max_period = max(r["period"] for r in self.price_alert_rules)
+        cutoff = now - max_period
+        while history and history[0][0] < cutoff:
+            history.popleft()
+
+        # 对每条规则独立检测
+        for rule_idx, rule in enumerate(self.price_alert_rules):
+            period = rule["period"]
+            threshold = rule["threshold"]
+            cooldown = rule["cooldown"]
+
+            # 找到该规则周期内最早的价格
+            rule_cutoff = now - period
+            base_price = None
+            for ts, price in history:
+                if ts >= rule_cutoff:
+                    base_price = price
+                    break
+
+            if base_price is None or base_price <= 0:
+                continue
+
+            # 需要至少有两个数据点
+            if base_price == current_price:
+                continue
+
+            # 计算周期内涨跌幅
+            change_pct = abs((current_price - base_price) / base_price) * 100
+
+            if change_pct >= threshold:
+                # 检查冷却
+                cd_key = (key, rule_idx)
+                last_fired = self._price_alert_cooldowns.get(cd_key, 0)
+                if now - last_fired < cooldown:
+                    continue
+
+                # 触发报警
+                self._price_alert_cooldowns[cd_key] = now
+                direction = "涨" if current_price > base_price else "跌"
+                actual_pct = (current_price - base_price) / base_price * 100
+                title = f"{name} 涨跌异动"
+                msg = (f"{code} {period}秒内"
+                       f"{direction}{abs(actual_pct):.2f}%"
+                       f"（{base_price:.2f}→{current_price:.2f}）")
+                self._fire_alert(title, msg)
+
+    def _check_new_high_low_alert(self, code, name, current_price, high_price, low_price):
+        """新高新低报警：当日最高价创新高或最低价创新低时发出通知。"""
+        if not self.new_high_low_alert_enabled:
+            return
+        if current_price <= 0 or high_price <= 0 or low_price <= 0:
+            return
+        if high_price <= low_price:
+            return  # 无效数据（还未交易）
+
+        key = (code or "").strip().lower()
+        now = time.time()
+
+        prev = self._nhl_last_known.get(key)
+        if prev is None:
+            # 首次记录，不触发报警
+            self._nhl_last_known[key] = {"high": high_price, "low": low_price}
+            return
+
+        prev_high = prev["high"]
+        prev_low = prev["low"]
+
+        # 检测新高
+        if self.new_high_alert and high_price > prev_high:
+            cd_key = (key, "high")
+            last_fired = self._nhl_cooldowns.get(cd_key, 0)
+            if now - last_fired >= self.new_high_low_cooldown:
+                self._nhl_cooldowns[cd_key] = now
+                title = f"{name} 创新高"
+                msg = f"{code} 当日新高 {high_price:.2f}（前高 {prev_high:.2f}）"
+                self._fire_alert(title, msg)
+
+        # 检测新低
+        if self.new_low_alert and low_price < prev_low:
+            cd_key = (key, "low")
+            last_fired = self._nhl_cooldowns.get(cd_key, 0)
+            if now - last_fired >= self.new_high_low_cooldown:
+                self._nhl_cooldowns[cd_key] = now
+                title = f"{name} 创新低"
+                msg = f"{code} 当日新低 {low_price:.2f}（前低 {prev_low:.2f}）"
+                self._fire_alert(title, msg)
+
+        # 更新记录
+        self._nhl_last_known[key] = {"high": high_price, "low": low_price}
+
+    def _check_limit_alert(self, code, name, current_price, limit_up, limit_down, dec):
+        """涨跌停通知：到达涨跌停或离开涨跌停时发出通知。"""
+        if not self.limit_alert_enabled:
+            return
+        if current_price <= 0:
+            return
+        if limit_up is None and limit_down is None:
+            return
+
+        key = (code or "").strip().lower()
+        now = time.time()
+        cur_rounded = round(current_price, dec)
+
+        # 当前涨跌停状态
+        is_limit_up = (limit_up is not None and cur_rounded == limit_up)
+        is_limit_down = (limit_down is not None and cur_rounded == limit_down)
+
+        prev = self._limit_alert_state.get(key)
+        if prev is None:
+            # 首次记录，不触发报警
+            self._limit_alert_state[key] = {"is_limit_up": is_limit_up, "is_limit_down": is_limit_down}
+            return
+
+        prev_up = prev["is_limit_up"]
+        prev_down = prev["is_limit_down"]
+
+        # 检测到达涨停
+        if self.limit_alert_reach_up and is_limit_up and not prev_up:
+            cd_key = (key, "reach_up")
+            last_fired = self._limit_alert_cooldowns.get(cd_key, 0)
+            if now - last_fired >= self.limit_alert_cooldown:
+                self._limit_alert_cooldowns[cd_key] = now
+                title = f"{name} 到达涨停"
+                msg = f"{code} 当前价 {current_price:.{dec}f} 触及涨停价 {limit_up:.{dec}f}"
+                self._fire_alert(title, msg)
+
+        # 检测到达跌停
+        if self.limit_alert_reach_down and is_limit_down and not prev_down:
+            cd_key = (key, "reach_down")
+            last_fired = self._limit_alert_cooldowns.get(cd_key, 0)
+            if now - last_fired >= self.limit_alert_cooldown:
+                self._limit_alert_cooldowns[cd_key] = now
+                title = f"{name} 到达跌停"
+                msg = f"{code} 当前价 {current_price:.{dec}f} 触及跌停价 {limit_down:.{dec}f}"
+                self._fire_alert(title, msg)
+
+        # 检测离开涨停
+        if self.limit_alert_leave_up and not is_limit_up and prev_up:
+            cd_key = (key, "leave_up")
+            last_fired = self._limit_alert_cooldowns.get(cd_key, 0)
+            if now - last_fired >= self.limit_alert_cooldown:
+                self._limit_alert_cooldowns[cd_key] = now
+                title = f"{name} 离开涨停"
+                msg = f"{code} 当前价 {current_price:.{dec}f} 已离开涨停价 {limit_up:.{dec}f}"
+                self._fire_alert(title, msg)
+
+        # 检测离开跌停
+        if self.limit_alert_leave_down and not is_limit_down and prev_down:
+            cd_key = (key, "leave_down")
+            last_fired = self._limit_alert_cooldowns.get(cd_key, 0)
+            if now - last_fired >= self.limit_alert_cooldown:
+                self._limit_alert_cooldowns[cd_key] = now
+                title = f"{name} 离开跌停"
+                msg = f"{code} 当前价 {current_price:.{dec}f} 已离开跌停价 {limit_down:.{dec}f}"
+                self._fire_alert(title, msg)
+
+        # 更新状态
+        self._limit_alert_state[key] = {"is_limit_up": is_limit_up, "is_limit_down": is_limit_down}
+
     def set_grid_visible(self, vis: bool):
         self.grid_visible = bool(vis)
         self.apply_style()
@@ -1287,6 +1581,10 @@ class FloatLabel(QWidget):
             self.simple_amount_visible = checked
         elif header == "均价":
             self.simple_avg_visible = checked
+        elif header == "日高":
+            self.simple_high_visible = checked
+        elif header == "日低":
+            self.simple_low_visible = checked
         elif header == "K线":
             self.simple_kline_visible = checked
         elif header == "盈亏":
@@ -1319,6 +1617,10 @@ class FloatLabel(QWidget):
                 return bool(self.simple_amount_visible)
             if header == "均价":
                 return bool(self.simple_avg_visible)
+            if header == "日高":
+                return bool(self.simple_high_visible)
+            if header == "日低":
+                return bool(self.simple_low_visible)
             if header == "K线":
                 return bool(self.simple_kline_visible)
             if header == "盈亏":
@@ -1326,7 +1628,113 @@ class FloatLabel(QWidget):
         except Exception:
             pass
         return False
-    
+
+    # ----- 涨跌异动报警设置 -----
+    def set_price_alert_enabled(self, enabled: bool):
+        """启用/禁用涨跌异动报警。"""
+        self.price_alert_enabled = bool(enabled)
+        if not enabled:
+            # 禁用时清空历史数据
+            self._price_history.clear()
+            self._price_alert_cooldowns.clear()
+        self._notify_change()
+
+    def set_price_alert_rules(self, rules: list):
+        """设置涨跌异动报警规则列表。"""
+        self.price_alert_rules = []
+        for r in (rules or []):
+            try:
+                self.price_alert_rules.append({
+                    "period": max(1, int(r.get("period", 60))),
+                    "threshold": max(0.1, float(r.get("threshold", 2.0))),
+                    "cooldown": max(1, int(r.get("cooldown", 120))),
+                })
+            except Exception:
+                pass
+        # 规则变化时清空历史和冷却状态
+        self._price_history.clear()
+        self._price_alert_cooldowns.clear()
+        self._notify_change()
+
+    def add_price_alert_rule(self, period: int, threshold: float, cooldown: int):
+        """添加一条涨跌异动报警规则。"""
+        self.price_alert_rules.append({
+            "period": max(1, int(period)),
+            "threshold": max(0.1, float(threshold)),
+            "cooldown": max(1, int(cooldown)),
+        })
+        self._price_history.clear()
+        self._price_alert_cooldowns.clear()
+        self._notify_change()
+
+    def remove_price_alert_rule(self, index: int):
+        """删除指定索引的报警规则。"""
+        if 0 <= index < len(self.price_alert_rules):
+            self.price_alert_rules.pop(index)
+            self._price_history.clear()
+            self._price_alert_cooldowns.clear()
+            self._notify_change()
+
+    # ----- 新高新低报警设置 -----
+    def set_new_high_low_alert_enabled(self, enabled: bool):
+        """启用/禁用新高新低报警。"""
+        self.new_high_low_alert_enabled = bool(enabled)
+        if not enabled:
+            self._nhl_last_known.clear()
+            self._nhl_cooldowns.clear()
+        self._notify_change()
+
+    def set_new_high_alert(self, enabled: bool):
+        """启用/禁用新高报警。"""
+        self.new_high_alert = bool(enabled)
+        self._notify_change()
+
+    def set_new_low_alert(self, enabled: bool):
+        """启用/禁用新低报警。"""
+        self.new_low_alert = bool(enabled)
+        self._notify_change()
+
+    def set_new_high_low_cooldown(self, seconds: int):
+        """设置新高新低报警冷却时间（秒）。"""
+        self.new_high_low_cooldown = max(1, int(seconds))
+        self._nhl_cooldowns.clear()
+        self._notify_change()
+
+    # ----- 涨跌停通知设置 -----
+    def set_limit_alert_enabled(self, enabled: bool):
+        """启用/禁用涨跌停通知。"""
+        self.limit_alert_enabled = bool(enabled)
+        if not enabled:
+            self._limit_alert_state.clear()
+            self._limit_alert_cooldowns.clear()
+        self._notify_change()
+
+    def set_limit_alert_reach_up(self, enabled: bool):
+        """启用/禁用到达涨停通知。"""
+        self.limit_alert_reach_up = bool(enabled)
+        self._notify_change()
+
+    def set_limit_alert_reach_down(self, enabled: bool):
+        """启用/禁用到达跌停通知。"""
+        self.limit_alert_reach_down = bool(enabled)
+        self._notify_change()
+
+    def set_limit_alert_leave_up(self, enabled: bool):
+        """启用/禁用离开涨停通知。"""
+        self.limit_alert_leave_up = bool(enabled)
+        self._notify_change()
+
+    def set_limit_alert_leave_down(self, enabled: bool):
+        """启用/禁用离开跌停通知。"""
+        self.limit_alert_leave_down = bool(enabled)
+        self._notify_change()
+
+    def set_limit_alert_cooldown(self, seconds: int):
+        """设置涨跌停通知冷却时间（秒）。"""
+        self.limit_alert_cooldown = max(1, int(seconds))
+        self._limit_alert_cooldowns.clear()
+        self._notify_change()
+
     # ----- 交互 -----
     def contextMenuEvent(self, event):
         menu = QMenu(self)
@@ -1355,6 +1763,11 @@ class FloatLabel(QWidget):
         act_grid.setChecked(self.grid_visible)
         act_grid.toggled.connect(self.set_grid_visible)
         menu.addAction(act_grid)
+
+        act_dual = QAction("双模式切换", menu, checkable=True)
+        act_dual.setChecked(self.dual_mode_enabled)
+        act_dual.toggled.connect(self.set_dual_mode_enabled)
+        menu.addAction(act_dual)
 
         menu.addSeparator()
         act_open_settings = QAction("设置…", menu)

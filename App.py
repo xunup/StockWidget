@@ -36,6 +36,8 @@ def save_config(cfg: dict):
 class App(QApplication):
     def __init__(self, argv):
         super().__init__(argv)
+        self.setApplicationName(APP_NAME)
+        self.setApplicationDisplayName(APP_NAME)
         self.setQuitOnLastWindowClosed(False)
         icon_path = resource_path(APP_ICON_FILE)
         # load saved icon choice from config
