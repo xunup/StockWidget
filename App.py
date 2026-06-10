@@ -1,7 +1,7 @@
 import sys, os, json, keyboard, winreg
 
-from PySide6.QtCore import Qt, QPoint
-from PySide6.QtGui import QAction, QIcon
+from PySide6.QtCore import Qt, QPoint, QSize
+from PySide6.QtGui import QAction, QIcon, QPixmap, QPainter, QColor, QPen, QBrush
 from PySide6.QtWidgets import QApplication, QSystemTrayIcon, QMenu, QStyle
 from WidgetPanel import FloatLabel
 from SettingPanel import SettingsDialog
@@ -73,6 +73,12 @@ class App(QApplication):
 
         app_icon = _resolve_icon(icon_choice)
         self.setWindowIcon(app_icon)
+        # 保存基础图标以便总盈亏指示灯叠加
+        self._base_app_icon = app_icon
+        # 总盈亏状态：(total_pnl, has_pnl)
+        self._pnl_status = (0.0, False)
+        # 托盘 ToolTip 指标文本（制表符分隔）
+        self._tooltip_text = ""
 
         cfg = load_config()
         self.win = FloatLabel(cfg)
@@ -84,6 +90,8 @@ class App(QApplication):
         self.win.set_on_change(self.save_now)
         self.win.set_open_settings_callback(self.open_settings)
         self.win.set_notifier_callback(self.notify_user)
+        self.win.set_pnl_callback(self.update_tray_pnl_status)
+        self.win.set_tooltip_callback(self.update_tray_tooltip)
 
         self.tray = QSystemTrayIcon(app_icon, self)
         self.tray.setToolTip(APP_NAME)
@@ -177,13 +185,15 @@ class App(QApplication):
             return self.style().standardIcon(QStyle.SP_ComputerIcon)
 
         icon = _resolve_icon(choice)
+        # 记录基础图标，后续还需叠加总盈亏指示灯
+        self._base_app_icon = icon
         try:
             self.setWindowIcon(icon)
         except Exception:
             pass
         try:
             if hasattr(self, 'tray') and self.tray is not None:
-                self.tray.setIcon(icon)
+                self._apply_tray_icon_with_pnl()
         except Exception:
             pass
 
@@ -195,6 +205,91 @@ class App(QApplication):
                                       QSystemTrayIcon.Information, 5000)
         except Exception:
             pass
+
+    def update_tray_pnl_status(self, total_pnl: float, has_pnl: bool):
+        """接收总盈亏变化，刷新托盘图标的红/绿灯泡指示。"""
+        try:
+            self._pnl_status = (float(total_pnl), bool(has_pnl))
+        except Exception:
+            self._pnl_status = (0.0, False)
+        try:
+            self._apply_tray_icon_with_pnl()
+        except Exception:
+            pass
+
+    def update_tray_tooltip(self, text: str):
+        """接收制表符格式的指标文本，刷新托盘 ToolTip。"""
+        try:
+            self._tooltip_text = str(text or "")
+        except Exception:
+            self._tooltip_text = ""
+        try:
+            self._apply_tray_icon_with_pnl()
+        except Exception:
+            pass
+
+    def _build_tray_tooltip(self) -> str:
+        """拼接托盘 ToolTip：总盈亏行（可选）+ 制表符格式的指标数据。"""
+        parts = []
+        total_pnl, has_pnl = getattr(self, '_pnl_status', (0.0, False))
+        if has_pnl:
+            sign = "+" if total_pnl > 0 else ("-" if total_pnl < 0 else "")
+            parts.append(f"总盈亏：{sign}{abs(total_pnl):,.2f}")
+        text = getattr(self, '_tooltip_text', "") or ""
+        if text:
+            parts.append(text)
+        return "\n".join(parts)
+
+    def _apply_tray_icon_with_pnl(self):
+        """根据当前总盈亏状态在基础图标右下角叠加红/绿灯泡。"""
+        if not hasattr(self, 'tray') or self.tray is None:
+            return
+        base_icon = getattr(self, '_base_app_icon', None)
+        if base_icon is None:
+            return
+        total_pnl, has_pnl = getattr(self, '_pnl_status', (0.0, False))
+        size = 64
+        pm = base_icon.pixmap(QSize(size, size))
+        if pm.isNull():
+            self.tray.setIcon(base_icon)
+            self.tray.setToolTip(self._build_tray_tooltip())
+            return
+        if not has_pnl:
+            # 未配置成本 — 不叠加灯泡
+            self.tray.setIcon(base_icon)
+            self.tray.setToolTip(self._build_tray_tooltip())
+            return
+        # 选色：沿用浮窗的涨/跌色（A股惯例：正红负绿）
+        try:
+            up_color = QColor(self.win.up_color)
+            down_color = QColor(self.win.down_color)
+        except Exception:
+            up_color = QColor(220, 60, 60)
+            down_color = QColor(60, 180, 90)
+        if total_pnl > 0:
+            color = up_color
+        elif total_pnl < 0:
+            color = down_color
+        else:
+            color = QColor(160, 160, 160)
+        # 绘制叠加小灯泡
+        result = QPixmap(pm)
+        painter = QPainter(result)
+        painter.setRenderHint(QPainter.Antialiasing, True)
+        d = int(size * 0.55)
+        x = size - d - 2
+        y = size - d - 2
+        # 白色描边便于在深色图标上识别
+        painter.setPen(QPen(QColor(255, 255, 255), 2))
+        painter.setBrush(QBrush(color))
+        painter.drawEllipse(x, y, d, d)
+        painter.end()
+        self.tray.setIcon(QIcon(result))
+        # 同步更新提示文本
+        try:
+            self.tray.setToolTip(self._build_tray_tooltip())
+        except Exception:
+            self.tray.setToolTip(APP_NAME)
 
     def set_start_on_boot(self, enabled: bool):
         """Enable or disable Windows startup by writing/removing Run key in HKCU."""

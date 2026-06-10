@@ -62,6 +62,9 @@ class FloatLabel(QWidget):
         self.dual_mode_enabled = bool(cfg.get("dual_mode_enabled", False))  # 是否启用双模式切换
         self.leave_delay_ms = int(cfg.get("leave_delay_ms", 500))           # 鼠标离开后切换简易模式的延迟(ms)
         self._is_hovered = False  # 鼠标是否悬浮在浮窗上
+        # 手动模式：当双模式自动切换关闭时生效，可选 "normal"/"simple"
+        manual_mode_cfg = str(cfg.get("manual_mode", "normal")).lower()
+        self.manual_mode = manual_mode_cfg if manual_mode_cfg in ("normal", "simple") else "normal"
 
         # 符号设置：日高/日低、涨停/跌停、涨/跌
         self.sym_high       = cfg.get("sym_high", "↑")         # 日高符号
@@ -91,6 +94,8 @@ class FloatLabel(QWidget):
         self.alert_data = {}
         self._alert_state = {}  # 运行时生效状态，与 thresholds 索引一一对应
         self._notify_alert = None  # 通知回调 fn(title, msg)
+        self._pnl_callback = None  # 总盈亏更新回调 fn(total_pnl: float, has_pnl: bool)
+        self._tooltip_callback = None  # 托盘 ToolTip 文本更新回调 fn(text: str)
         if isinstance(alert_cfg, dict):
             for k, v in alert_cfg.items():
                 try:
@@ -389,6 +394,7 @@ class FloatLabel(QWidget):
             "sym_fall": self.sym_fall,
             "dual_mode_enabled": bool(self.dual_mode_enabled),
             "leave_delay_ms": int(self.leave_delay_ms),
+            "manual_mode": str(self.manual_mode),
             "simple_flags": {
                 "代码": bool(self.simple_code_visible),
                 "名称": bool(self.simple_name_visible),
@@ -462,13 +468,19 @@ class FloatLabel(QWidget):
 
     # ----- 双模式切换：活跃指标可见性 -----
     def _active_header_is_visible(self, header: str) -> bool:
-        """根据当前双模式状态和鼠标悬浮状态返回应当显示的列可见性。
-        - dual_mode_enabled=False: 始终用正常模式
-        - dual_mode_enabled=True + 未悬浮: 用简易模式
+        """根据当前双模式状态、鼠标悬浮状态及手动模式返回应当显示的列可见性。
         - dual_mode_enabled=True + 悬浮: 用正常模式
+        - dual_mode_enabled=True + 未悬浮: 用简易模式
+        - dual_mode_enabled=False: 由 manual_mode 决定（normal=正常模式, simple=简易模式）
         """
-        if not self.dual_mode_enabled or self._is_hovered:
-            return self.header_is_visible(header)
+        if self.dual_mode_enabled:
+            if self._is_hovered:
+                return self.header_is_visible(header)
+            # 自动模式下未悬浮 -> 简易模式
+        else:
+            # 手动模式
+            if self.manual_mode != "simple":
+                return self.header_is_visible(header)
         # 简易模式
         try:
             if header == "代码":
@@ -660,6 +672,8 @@ class FloatLabel(QWidget):
 
         price_data = []
         sign_data = []
+        total_pnl = 0.0
+        has_pnl = False
         url = 'https://hq.sinajs.cn/list=' + label
         headers = {'Referer': 'https://finance.sina.com.cn', 'User-Agent': 'Mozilla/5.0'}
         r = requests.get(url, headers=headers, timeout=3)
@@ -858,6 +872,8 @@ class FloatLabel(QWidget):
                 pnl_val = (current_price - cd["cost"]) * cd["qty"]
                 pnl_label = self._fmt_signed(pnl_val, 3 if etf else 2)
                 pnl_sign = (pnl_val > 0) - (pnl_val < 0)
+                total_pnl += pnl_val
+                has_pnl = True
             else:
                 pnl_label = ""
                 pnl_sign = 0
@@ -917,7 +933,7 @@ class FloatLabel(QWidget):
                 "low": (low_price > prev_close) - (low_price < prev_close) if prev_close else 0,
             })
         
-        return price_data, sign_data
+        return price_data, sign_data, total_pnl, has_pnl
 
     def _project_columns(self, full_rows, sign_data):
         # 从 ALL_HEADERS 中按显示顺序筛选已启用的列（使用双模式感知的可见性）
@@ -950,7 +966,7 @@ class FloatLabel(QWidget):
 
     def _refresh_from_function(self):
         try:
-            full_rows, sign = self._get_price(self.checked_codes)
+            full_rows, sign, total_pnl, has_pnl = self._get_price(self.checked_codes)
         except Exception as e:
             try:
                 import requests as _req
@@ -967,6 +983,32 @@ class FloatLabel(QWidget):
         except Exception:
             pass
         self._project_columns(full_rows, sign)
+        # 通知外部更新总盈亏指示（用于托盘图标红绿灯泡）
+        try:
+            if callable(self._pnl_callback):
+                self._pnl_callback(float(total_pnl), bool(has_pnl))
+        except Exception:
+            pass
+        # 构建托盘 ToolTip 指标文本（使用制表符分隔）
+        # 始终使用正常模式可见列，不受双模式/简易模式影响
+        try:
+            if callable(self._tooltip_callback):
+                cols_idx = [i for i, h in enumerate(self.ALL_HEADERS)
+                            if self.header_is_visible(h) and h != "K线"]
+                if cols_idx and full_rows:
+                    headers_text = [self.ALL_HEADERS[i] for i in cols_idx]
+                    lines = ["\t".join(headers_text)]
+                    for row in full_rows:
+                        cells = []
+                        for i in cols_idx:
+                            v = row[i] if i < len(row) else ""
+                            cells.append("" if isinstance(v, dict) else str(v))
+                        lines.append("\t".join(cells))
+                    self._tooltip_callback("\n".join(lines))
+                else:
+                    self._tooltip_callback("")
+        except Exception:
+            pass
 
     # ----- 应用设置 -----
     def set_codes(self, codes_list):
@@ -1156,6 +1198,14 @@ class FloatLabel(QWidget):
     def set_notifier_callback(self, fn):
         """设置预警通知回调 fn(title, msg)。"""
         self._notify_alert = fn
+
+    def set_pnl_callback(self, fn):
+        """设置总盈亏更新回调 fn(total_pnl: float, has_pnl: bool)。"""
+        self._pnl_callback = fn
+
+    def set_tooltip_callback(self, fn):
+        """设置托盘 ToolTip 指标文本更新回调 fn(text: str)。"""
+        self._tooltip_callback = fn
 
     def set_alert(self, code: str, thresholds: list):
         """设置指定股票的封单预警阈值列表（手数，正=涨停，负=跌停）。"""
@@ -1553,6 +1603,21 @@ class FloatLabel(QWidget):
         self._notify_change()
         self._refresh_from_function()
 
+    def set_manual_mode(self, mode: str):
+        """设置手动显示模式（仅当双模式自动切换关闭时生效）。
+        mode: "normal" 或 "simple"。
+        """
+        mode = str(mode).lower()
+        if mode not in ("normal", "simple"):
+            return
+        if mode == self.manual_mode:
+            return
+        self.manual_mode = mode
+        self._notify_change()
+        # 仅在自动切换关闭时立即刷新视图
+        if not self.dual_mode_enabled:
+            self._refresh_from_function()
+
     def set_leave_delay_ms(self, ms: int):
         """设置鼠标离开后切换简易模式的延迟时间(ms)。"""
         self.leave_delay_ms = max(0, int(ms))
@@ -1769,6 +1834,19 @@ class FloatLabel(QWidget):
         act_dual.toggled.connect(self.set_dual_mode_enabled)
         menu.addAction(act_dual)
 
+        # 手动模式选择：仅当双模式自动切换关闭时可用
+        sub_mode = QMenu("当前显示模式", menu)
+        sub_mode.setEnabled(not self.dual_mode_enabled)
+        act_mode_normal = QAction("正常模式", sub_mode, checkable=True)
+        act_mode_normal.setChecked(self.manual_mode == "normal")
+        act_mode_normal.triggered.connect(lambda: self.set_manual_mode("normal"))
+        sub_mode.addAction(act_mode_normal)
+        act_mode_simple = QAction("简易模式", sub_mode, checkable=True)
+        act_mode_simple.setChecked(self.manual_mode == "simple")
+        act_mode_simple.triggered.connect(lambda: self.set_manual_mode("simple"))
+        sub_mode.addAction(act_mode_simple)
+        menu.addMenu(sub_mode)
+
         menu.addSeparator()
         act_open_settings = QAction("设置…", menu)
         act_open_settings.triggered.connect(self._open_settings_cb)
@@ -1843,8 +1921,7 @@ class FloatLabel(QWidget):
 
     def hideEvent(self, event):
         super().hideEvent(event)
-        if self.timer and self.timer.isActive(): 
-            self.timer.stop()
+        # 隐藏后仍需继续刷新以保证托盘 ToolTip / 总盈亏灯泡及时更新，不停数据刷新定时器
         if self._keep_top_timer and self._keep_top_timer.isActive():
             self._keep_top_timer.stop()
 
